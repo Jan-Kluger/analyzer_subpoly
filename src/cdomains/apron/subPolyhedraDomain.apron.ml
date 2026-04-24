@@ -1,6 +1,6 @@
 (** OCaml implementation of the subpolyhedra domain.
 
-    @see <http://doi.acm.org/NOTYETPUBLISHED>  Subpolyhedra. *)
+    @see <https://www.microsoft.com/en-us/research/wp-content/uploads/2011/06/subpolyhedra.pdf>  Subpolyhedra. *)
 
 open Batteries
 open GoblintCil
