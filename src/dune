@@ -47,6 +47,14 @@
       (apron -> linearTwoVarEqualityDomain.apron.ml)
       (-> linearTwoVarEqualityDomain.no-apron.ml)
     )
+    (select subPolyhedraAnalysis.ml from
+      (apron -> subPolyhedraAnalysis.apron.ml)
+      (-> subPolyhedraAnalysis.no-apron.ml)
+    )
+    (select subPolyhedraDomain.ml from
+      (apron -> subPolyhedraDomain.apron.ml)
+      (-> subPolyhedraDomain.no-apron.ml)
+    )
     (select relationAnalysis.ml from
       (apron -> relationAnalysis.apron.ml)
       (-> relationAnalysis.no-apron.ml)
