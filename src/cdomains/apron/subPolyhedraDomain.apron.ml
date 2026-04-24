@@ -19,40 +19,24 @@ module type Var = sig
   val string_of : t -> string
 end
 
-(** A linear constraint represents sum_i c_i * v_i <= b with rational coefficients *)
-type 'v lcons = {
-  coeffs: ('v * Mpqf.t) list;
-  bound: Mpqf.t;
-}
-
-let string_of_lcons f {coeffs; bound} =
-  let terms = List.map (fun (v, c) -> Mpqf.to_string c ^ "*" ^ f v) coeffs in
-  String.concat " + " terms ^ " <= " ^ Mpqf.to_string bound
-
 (**
  * SubPoly module
- * - represents a conjunction of linear constraints sum_i c_i * v_i <= b
-*)
+ * - internal representation of a consistent subpolyhedron
+ * TODO: pick a type t, maybe (affine-equality, interval map)
+ *)
 module SubPoly (Var : Var) = struct
-  module VarMap = Map.Make(Var)
-
-  (** t encodes a valid subpolyhedron. None represents bottom. *)
-  type t = Var.t lcons list option
-
-  let equal _ _ = failwith "SubPolyhedraDomain.SubPoly.equal: not implemented"
-  let compare _ _ = failwith "SubPolyhedraDomain.SubPoly.compare: not implemented"
-  let hash _ = failwith "SubPolyhedraDomain.SubPoly.hash: not implemented"
+  (** Placeholder internal type. Replace with (affeq, interval-map, ...) once designed. *)
+  type t = unit [@@deriving eq, ord, hash]
 
   let copy = Fun.id
-  let empty () = Some []
+  let empty () = ()
   let is_empty _ = failwith "SubPolyhedraDomain.SubPoly.is_empty: not implemented"
   let dim_add (_ch: Apron.Dim.change) _t = failwith "SubPolyhedraDomain.SubPoly.dim_add: not implemented"
   let dim_remove (_ch: Apron.Dim.change) _t = failwith "SubPolyhedraDomain.SubPoly.dim_remove: not implemented"
 
-  let string_of = function
-    | None -> "\tBot\n"
-    | Some cs -> String.concat "" (List.map (fun c -> "\t" ^ string_of_lcons Var.string_of c ^ "\n") cs)
+  let string_of _ = "<subpoly>"
 
+  let _ = Var.string_of (* silence unused-functor-arg warning until Var is actually used *)
 end
 
 (** [VarManagement] defines the type t of the subpolyhedra domain (a record that contains an optional subpolyhedron and an apron environment)
@@ -97,8 +81,10 @@ struct
   let to_yojson _ = failwith "SubPolyhedraDomain.to_yojson: not implemented"
 
   (* pretty printing *)
-  let show _a = failwith "SubPolyhedraDomain.show: not implemented"
-  let pretty () _x = failwith "SubPolyhedraDomain.pretty: not implemented"
+  let show t = match t.d with
+    | None -> "\tBot\n"
+    | Some d -> SubPolyDomain.string_of d
+  let pretty () x = text (show x)
   let pretty_diff () (x, y) =
     dprintf "%s: %a not leq %a" (name ()) pretty x pretty y
   let printXml _f _x = failwith "SubPolyhedraDomain.printXml: not implemented"
@@ -129,7 +115,7 @@ struct
 
   (* Module AssertionRels demands: *)
   let assert_constraint _ask _d _e _negate (_no_ov: bool Lazy.t) = failwith "SubPolyhedraDomain.assert_constraint: not implemented"
-  let env _t = failwith "SubPolyhedraDomain.env: not implemented"
+  let env t = t.env
   let eval_interval _ask = Bounds.bound_texpr
   let invariant _t = failwith "SubPolyhedraDomain.invariant: not implemented"
 
