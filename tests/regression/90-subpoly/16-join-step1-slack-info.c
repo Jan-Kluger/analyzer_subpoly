@@ -3,14 +3,11 @@
 #include <goblint.h>
 
 /*
-Needed stubs/functions:
-
-* Everything from 08-join-same-template.c
-* SubPolyDomain.saturate_slack_info_for_join
-* SubPolyDomain.reduce
-* SubPolyDomain.meet or add equality row during saturation
-* SubPolyDomain.join with slack renaming
-* SubPolyDomain.eval_linear_form
+SUBPOLY-REQUIRES:
+SubPolyDomain.meet
+SubPolyDomain.join
+SubPolyDomain.add_affeq_row
+SubPolyDomain.set_slack
 */
 
 int main(void) {

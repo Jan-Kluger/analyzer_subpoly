@@ -3,14 +3,11 @@
 #include <goblint.h>
 
 /*
-Needed stubs/functions:
-
-* Everything from 06-constant-assignment.c
-* D.assign_exp for linear expressions
-* D.assert_constraint for non-unary coefficient constraints such as wb >= 2 * count
-* SubPolyDomain.reduce strong enough for derived linear forms
-* ExpressionBounds.bound_texpr or D.invariant
-* Optional later: interprocedural propagation/precondition checking
+SUBPOLY-REQUIRES:
+D.assign_exp
+D.assert_constraint
+ExpressionBounds.bound_texpr
+D.invariant
 */
 
 int main(void) {

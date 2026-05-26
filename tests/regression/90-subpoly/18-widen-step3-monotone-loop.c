@@ -3,15 +3,11 @@
 #include <goblint.h>
 
 /*
-Needed stubs/functions:
-
-* D.assign_var or D.assign_exp for i = k
-* D.assign_exp for i++
-* SubPolyDomain.widen
-* SubPolyDomain.recover_dropped_equalities_widen
-* SubPolyDomain.eval_linear_form
-* SubPolyDomain.leq
-* SubPolyDomain.reduce
+SUBPOLY-REQUIRES:
+D.assign_var
+D.assign_exp
+SubPolyDomain.widen
+SubPolyDomain.leq
 */
 
 int main(void) {

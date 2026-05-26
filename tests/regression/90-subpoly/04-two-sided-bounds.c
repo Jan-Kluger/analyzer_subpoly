@@ -3,15 +3,13 @@
 #include <goblint.h>
 
 /*
-Needed stubs/functions:
-
-* Everything from 03-single-ineq.c
-* RationalInterval.meet
-* RationalInterval.join
-* SubPolyDomain.set_interval
-* SubPolyDomain.mem_slack
-* D.meet
-* Slack identity/canonicalization in Slack_managment.slack_var_of_constraint
+SUBPOLY-REQUIRES:
+RationalInterval.meet
+RationalInterval.join
+SubPolyDomain.set_interval
+SubPolyDomain.mem_slack
+D.meet
+Slack_managment.slack_var_of_constraint
 */
 
 int main(void) {

@@ -3,16 +3,14 @@
 #include <goblint.h>
 
 /*
-Needed stubs/functions:
-
-* D.assign_var for x = i and y = j
-* D.assign_exp for x-- and y--
-* SubPolyDomain.join
-* SubPolyDomain.widen
-* SubPolyDomain.reduce
-* D.assert_constraint for loop guards and equality guards
-* ExpressionBounds.bound_texpr for equality check
-* SubPolyDomain.leq
+SUBPOLY-REQUIRES:
+D.assign_var
+D.assign_exp
+SubPolyDomain.join
+SubPolyDomain.widen
+D.assert_constraint
+ExpressionBounds.bound_texpr
+SubPolyDomain.leq
 */
 
 int main(void) {

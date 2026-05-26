@@ -3,15 +3,11 @@
 #include <goblint.h>
 
 /*
-Needed stubs/functions:
-
-* Everything from 04-two-sided-bounds.c
-* SubPolyDomain.join
-* RationalInterval.join
-* SubPolyDomain.leq
-* SubPolyDomain.copy
-* Slack info equality/renaming
-* Environment alignment for joins
+SUBPOLY-REQUIRES:
+SubPolyDomain.join
+RationalInterval.join
+SubPolyDomain.leq
+SubPolyDomain.copy
 */
 
 int main(void) {

@@ -4,19 +4,20 @@
 
 /*
 SUBPOLY-REQUIRES:
-D.invariant
+SubPolyDomain.set_interval
 ExpressionBounds.bound_texpr
-D.eval_interval
-SubPolyDomain.leq
-SubPolyDomain.meet
+D.assert_constraint
+D.assign_exp
 */
 
 int main(void) {
-    int a;
-    int b;
+    int x;
+    int y;
 
-    __goblint_assume(a + b <= 10);
-    __goblint_check(a + b <= 10); // SUCCESS
+    __goblint_assume(x - y == 0);
+    __goblint_assume(x >= 5);
+
+    __goblint_check(y >= 5); // SUCCESS
 
     return 0;
 }
