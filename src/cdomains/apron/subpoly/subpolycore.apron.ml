@@ -177,7 +177,7 @@ we need to use it inside the core functionality
 
   let dim_remove (ch: Apron.Dim.change) (t: t) = 
     let new_affeq = Matrix.dim_remove ch t.affeq in
-    let new_t = failwith "forget_vars (List.map Var.to_t dim_list) t" in (* TODO: forget_vars is corretly in module D, but we need to use this here *)
+    let new_t = failwith "forget_vars (List.map Var.to_t dim_list) t" in 
     let dim_list = Array.to_list ch.dim in
     let dim_list = List.sort_uniq Int.compare dim_list in (* remove duplicates *)
     let new_slacks = new_slacks_remove new_t.slacks dim_list in 
