@@ -151,6 +151,7 @@ rule() {
 
 if [ $# -eq 0 ]; then
   rule native
+  rule byte
 else
   while [ $# -gt 0 ]; do
     rule $1;

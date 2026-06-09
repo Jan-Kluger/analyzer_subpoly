@@ -1,4 +1,5 @@
 native :
+	@./make.sh native byte
 
 % :
 	@./make.sh $@
