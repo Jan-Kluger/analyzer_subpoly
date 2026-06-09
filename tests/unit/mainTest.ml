@@ -8,6 +8,7 @@ let all_tests =
     SolverTest.test ();
     LvalTest.test ();
     SparseMatrixImplementationTest.test () ;
+    SubpolycoreTest.test ();
     CompilationDatabaseTest.tests;
     LibraryDslTest.tests;
     CilfacadeTest.tests;

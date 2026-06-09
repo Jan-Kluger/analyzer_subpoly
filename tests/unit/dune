@@ -9,6 +9,10 @@
         (apron -> sparseMatrixImplementationTest.apron.ml)
         (-> sparseMatrixImplementationTest.no-apron.ml)
     )
+    (select subpolycoreTest.ml from
+        (apron -> subpolycoreTest.apron.ml)
+        (-> subpolycoreTest.no-apron.ml)
+    )
   )
   (preprocess (pps ppx_deriving.std ppx_deriving_hash ppx_deriving_yojson))
   (flags :standard -open Goblint_std -linkall))
