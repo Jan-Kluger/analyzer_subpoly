@@ -10,13 +10,16 @@ module RationalInterval : Intervalsig.IntervalSig with type bound = Q.t = struct
     | (Some l1, Some u1), (Some l2, Some u2) -> Q.equal l1 l2 && Q.equal u1 u2
     | _ -> false
 
-  let compare ((l1, u1) as interval_1 : t) ((l2, u2) as interval_2 : t) =
-    match interval_1, interval_2 with
-    | (None, None), (None, None) -> 0
-    | (Some l1, Some u1), (Some l2, Some u2) ->
-      let c_lower = Q.compare l1 l2 in
-      if c_lower <> 0 then c_lower else Q.compare u1 u2
-    | _ -> 1
+  let compare_bound_opt (a : Q.t option) (b : Q.t option) =
+    match a, b with
+    | None, None -> 0
+    | None, Some _ -> -1
+    | Some _, None -> 1
+    | Some a, Some b -> Q.compare a b
+
+  let compare ((l1, u1) : t) ((l2, u2) : t) =
+    let c_lower = compare_bound_opt l1 l2 in
+    if c_lower <> 0 then c_lower else compare_bound_opt u1 u2
 
   let hash_q (q : bound) =
     Hashtbl.hash (q.Q.num, q.Q.den)
@@ -39,6 +42,24 @@ module RationalInterval : Intervalsig.IntervalSig with type bound = Q.t = struct
 
   let of_bounds ~lower ~upper = (lower, upper)
 
+  (* bounds *)
+
+  let bounds ((l, u) : t) = (l, u)
+
+  (* of_const *)
+
+  let of_const (c : bound) = (Some c, Some c)
+
+  (* add *)
+
+  let add ((l1, u1) : t) ((l2, u2) : t) =
+    let add_opt a b =
+      match a, b with
+      | Some a, Some b -> Some (Q.add a b)
+      | _ -> None
+    in
+    add_opt l1 l2, add_opt u1 u2
+
   (* scale *)
 
   let scale_bound (factor : bound) (b : bound option) =
@@ -57,27 +78,40 @@ module RationalInterval : Intervalsig.IntervalSig with type bound = Q.t = struct
 
   (* meet *)
 
-  let min_bound (a : bound option) (b : bound option) =
-    match a, b with
-    | None, _ | _, None -> None
-    | Some a, Some b -> Some (if Q.compare a b <= 0 then a else b)
+  (* [None] is -inf in lower-bound position and +inf in upper-bound position,
+     so the neutral/dominant handling of [None] differs in all four cases. *)
 
-  let max_bound (a : bound option) (b : bound option) =
+  let max_lower (a : bound option) (b : bound option) = (* None neutral *)
     match a, b with
     | None, x | x, None -> x
     | Some a, Some b -> Some (if Q.compare a b >= 0 then a else b)
 
+  let min_upper (a : bound option) (b : bound option) = (* None neutral *)
+    match a, b with
+    | None, x | x, None -> x
+    | Some a, Some b -> Some (if Q.compare a b <= 0 then a else b)
+
   let meet ((l1, u1) : t) ((l2, u2) : t) =
-    let lower = max_bound l1 l2 in
-    let upper = min_bound u1 u2 in
+    let lower = max_lower l1 l2 in
+    let upper = min_upper u1 u2 in
     match lower, upper with
     | Some l, Some u when Q.compare l u > 0 -> None
     | _ -> Some (lower, upper)
 
   (* join *)
 
+  let min_lower (a : bound option) (b : bound option) = (* None dominant *)
+    match a, b with
+    | None, _ | _, None -> None
+    | Some a, Some b -> Some (if Q.compare a b <= 0 then a else b)
+
+  let max_upper (a : bound option) (b : bound option) = (* None dominant *)
+    match a, b with
+    | None, _ | _, None -> None
+    | Some a, Some b -> Some (if Q.compare a b >= 0 then a else b)
+
   let join ((l1, u1) : t) ((l2, u2) : t) =
-    min_bound l1 l2, max_bound u1 u2
+    min_lower l1 l2, max_upper u1 u2
 
   (* leq *)
 
@@ -95,6 +129,22 @@ module RationalInterval : Intervalsig.IntervalSig with type bound = Q.t = struct
 
   let leq ((l1, u1) : t) ((l2, u2) : t) =
     lower_leq l2 l1 && upper_leq u1 u2
+
+  (* widen *)
+
+  let widen ((l1, u1) : t) ((l2, u2) : t) =
+    (match l1, l2 with
+     | Some a, Some b when Q.geq b a -> Some a
+     | _ -> None),
+    (match u1, u2 with
+     | Some a, Some b when Q.leq b a -> Some a
+     | _ -> None)
+
+  (* narrow *)
+
+  let narrow ((l1, u1) : t) ((l2, u2) : t) =
+    (match l1 with None -> l2 | Some _ -> l1),
+    (match u1 with None -> u2 | Some _ -> u1)
 
   (* show *)
 

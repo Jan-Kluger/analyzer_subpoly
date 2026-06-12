@@ -11,6 +11,15 @@ module type IntervalSig = sig
   (** Returns [true] iff the interval is unconstrained. *)
   val is_top : t -> bool
 
+  (** Lower and upper bound; [None] means unbounded on that side. *)
+  val bounds : t -> bound option * bound option
+
+  (** The singleton interval [c, c]. *)
+  val of_const : bound -> t
+
+  (** Pointwise sum of two intervals. *)
+  val add : t -> t -> t
+
   (** Builds an interval from optional bounds.
 
       [lower = None] means no lower bound. [upper = None] means no upper bound. *)
@@ -39,6 +48,14 @@ module type IntervalSig = sig
 
       [leq x y] holds when [x] is contained in [y]. *)
   val leq : t -> t -> bool
+
+  (** Standard interval widening: [widen old new] keeps bounds of [old] that
+      did not grow in [new] and drops the others to infinity. *)
+  val widen : t -> t -> t
+
+  (** Standard interval narrowing: [narrow a b] refines only the infinite
+      bounds of [a] with the corresponding bounds of [b]. *)
+  val narrow : t -> t -> t
 
   (** Human-readable representation of an interval. *)
   val show : t -> string
