@@ -10,7 +10,7 @@
         (-> sparseMatrixImplementationTest.no-apron.ml)
     )
     (select subPolyhedraDomainTest.ml from
-        (apron -> subPolyhedraDomainTest.apron.ml)
+        (apron apron.polkaMPQ -> subPolyhedraDomainTest.apron.ml)
         (-> subPolyhedraDomainTest.no-apron.ml)
     )
   )

@@ -11,7 +11,7 @@ and two bugs found in the shared sparse-matrix library
 |---|---|
 | Regression tests (`tests/regression/90-subpoly/`, 30 tests) | all pass (`ruby scripts/update_suite.rb group subpoly`) |
 | Same 30 tests with `--enable dbg.subpoly.check-invariants` | all pass, no invariant violations |
-| QCheck property tests (32 properties, `tests/unit/subPolyhedraDomainTest.apron.ml`) | all pass, stable across repeated seeds |
+| QCheck property tests (33 properties, `tests/unit/subPolyhedraDomainTest.apron.ml`) | all pass, stable across repeated seeds |
 | Foreign-group crash sweep (36-apron, 46-apron2, 63-affeq with subpoly activated, ~215 tests) | zero subpoly-caused crashes or timeouts |
 | Build | warning-clean |
 
@@ -131,12 +131,29 @@ never hand-built matrices. On top of that generator:
 - **Bounds oracle**: `Bounds.bound_texpr` of a random linear expression must
   contain its concrete value — this exercises `propagate`/`eval_vec`, the
   machinery behind every analysis query.
+- **Differential testing against Polka polyhedra**: the same operation trace
+  is run in lockstep through subpoly and Apron's polkaMPQ. Polyhedra are
+  strictly more expressive and polka implements the trace operations exactly,
+  so γ(poly) ⊆ γ(subpoly) holds at every step — subpoly must never prove
+  anything polyhedra refutes: if subpoly is bottom so is polyhedra, and every
+  expression bound subpoly reports must be at least as wide as polyhedra's
+  (checked per step on the program variables, plus random query expressions
+  at the end of the trace). To keep the containment argument valid: the
+  polka environment is *real*-typed and its texprs use Real arithmetic
+  (polka's own integrality tightening is unrelated to subpoly's ceil/floor
+  bound rounding and breaks comparability — e.g. on equality systems without
+  integer solutions); strict guards are translated to `e − 1 ≥ 0` on the
+  polka side, mirroring subpoly's integer tightening of `e > 0`; disequality
+  guards send polka to bottom iff it satisfies `e = 0` (at least as precise
+  as subpoly's contradiction-only use of DISEQ); widening is excluded from
+  differential traces (widenings are not monotone, so no containment holds
+  between the two domains' results).
 
 The oracles were validated by mutation testing: flipping the bound direction
-in `meet_tcons`'s inequality case is caught immediately by both oracles —
-and by none of the lattice-law tests, confirming the oracle covers the gap
-(transfer-function unsoundness is invisible to laws relating abstract states
-to each other).
+in `meet_tcons`'s inequality case is caught immediately by both oracles and
+by the polyhedra differential test — and by none of the lattice-law tests,
+confirming they cover the gap (transfer-function unsoundness is invisible to
+laws relating abstract states to each other).
 
 Run with `dune test tests/unit`, or just this suite:
 `_build/default/tests/unit/mainTest.exe -only-test ":6:subPolyhedraDomain"`
@@ -212,8 +229,9 @@ upstream to Goblint.
   is `bot_env = {d = None; ...}`. This is inherited shared-functor behavior
   (affeq has the same); subpoly's `is_bot` is `is_bot_env`. Left untouched to
   avoid changing analysis behavior, but corrected inside the test wrapper.
-- Remaining testing ideas (not yet implemented): differential testing
-  against polkaMPQ polyhedra (subpoly must never prove what polyhedra
-  refutes; proven-assertion counts as a precision metric), CI-grade foreign
-  regression-group sweeps with relaxed expectations, an oracle mode that can
-  also check meets, and upstreaming the two library bug reports.
+- Remaining testing ideas (not yet implemented): analysis-level precision
+  comparison against the polyhedra analysis (proven-assertion counts via
+  `RelationPrecCompareUtil` — the domain-level differential test above
+  already covers the soundness direction), CI-grade foreign regression-group
+  sweeps with relaxed expectations, an oracle mode that can also check meets,
+  and upstreaming the two library bug reports.

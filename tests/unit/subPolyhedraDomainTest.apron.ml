@@ -26,12 +26,14 @@ type op =
   | WidenWith of op list
 [@@deriving show]
 
-let texpr_of ((k, cs): linexp) : Apron.Texpr1.expr =
+let texpr_of_typ (rt: Apron.Texpr1.typ) ((k, cs): linexp) : Apron.Texpr1.expr =
   let open Apron.Texpr1 in
   List.fold_left2 (fun acc c v ->
       if c = 0 then acc
-      else Binop (Add, acc, Binop (Mul, Cst (Apron.Coeff.s_of_int c), Var v, Int, Near), Int, Near))
+      else Binop (Add, acc, Binop (Mul, Cst (Apron.Coeff.s_of_int c), Var v, rt, Near), rt, Near))
     (Cst (Apron.Coeff.s_of_int k)) cs prog_vars
+
+let texpr_of : linexp -> Apron.Texpr1.expr = texpr_of_typ Apron.Texpr1.Int
 
 let typ_of = function
   | 0 -> Apron.Tcons1.EQ
@@ -303,9 +305,155 @@ let bounds_oracle =
          else true
        end)
 
+(* Differential testing against Polka polyhedra.
+
+   Convex polyhedra are strictly more expressive than subpolyhedra, and
+   polkaMPQ implements the trace operations exactly (linear assignment, EQ and
+   SUPEQ meets, meet; its join is the convex hull, the smallest convex
+   superset, while subpoly's join is some convex superset). So along any trace
+   gamma(poly) is contained in gamma(subpoly), and subpoly must never prove
+   anything polyhedra refutes: if subpoly is bottom so is polyhedra, and every
+   bound subpoly reports for an expression must be at least as wide as
+   polyhedra's.
+
+   WidenWith is excluded from differential traces: widenings are not monotone
+   and the two domains' widenings are unrelated, so no containment holds.
+   Two guard kinds are translated for the polyhedra side to keep it at least
+   as precise as subpoly:
+   - SUP: subpoly tightens e > 0 to e >= 1 for integral coefficients (all
+     trace coefficients are integral), so polyhedra meets with e - 1 >= 0;
+   - DISEQ: subpoly only uses disequalities to detect contradiction, so
+     polyhedra goes to bottom iff it satisfies e = 0 (at least as precise,
+     independent of polka's unspecified native DISEQ handling).
+   The polyhedra texprs use Real arithmetic so Apron applies no integer
+   rounding over-approximation; over integer stores the semantics coincide. *)
+
+let poly_man = Polka.manager_alloc_loose ()
+(* real-typed variables: the polyhedra side must be purely rational, since the
+   containment argument doesn't survive polka's own integrality tightening
+   (e.g. its handling of equalities without integer solutions differs from
+   subpoly's ceil/floor bound rounding) *)
+let poly_env = Apron.Environment.make [||] (Array.of_list prog_vars)
+let poly_base = Apron.Abstract1.top poly_man poly_env
+
+let poly_texpr1 (e: linexp) : Apron.Texpr1.t =
+  Apron.Texpr1.of_expr poly_env (texpr_of_typ Apron.Texpr1.Real e)
+
+let poly_is_bot p = Apron.Abstract1.is_bottom poly_man p
+
+let rec poly_apply p (op: op) =
+  let open Apron in
+  let meet_with typ e =
+    let arr = Tcons1.array_make poly_env 1 in
+    Tcons1.array_set arr 0 (Tcons1.make (poly_texpr1 e) typ);
+    Abstract1.meet_tcons_array poly_man p arr
+  in
+  match op with
+  | Assign (i, e) -> Abstract1.assign_texpr poly_man p (List.nth prog_vars i) (poly_texpr1 e) None
+  | Guard (ty, e) ->
+    (match typ_of ty with
+     | Tcons1.SUP -> let (k, cs) = e in meet_with Tcons1.SUPEQ (k - 1, cs)
+     | Tcons1.DISEQ ->
+       if Abstract1.sat_tcons poly_man p (Tcons1.make (poly_texpr1 e) Tcons1.EQ)
+       then Abstract1.bottom poly_man poly_env
+       else p
+     | typ -> meet_with typ e)
+  | Forget i -> Abstract1.forget_array poly_man p [| List.nth prog_vars i |] false
+  | JoinWith ops -> Abstract1.join poly_man p (poly_run ops)
+  | MeetWith ops -> Abstract1.meet poly_man p (poly_run ops)
+  | WidenWith _ -> p (* not generated in differential traces *)
+
+and poly_run ops = List.fold_left poly_apply poly_base ops
+
+let q_of_scalar (s: Apron.Scalar.t) : Q.t option =
+  if Apron.Scalar.is_infty s <> 0 then None
+  else match s with
+    | Apron.Scalar.Mpqf f -> Some (P.q_of_mpqf f)
+    | Apron.Scalar.Float f -> Some (Q.of_float f)
+    | Apron.Scalar.Mpfrf _ -> failwith "unexpected Mpfrf scalar from polkaMPQ"
+
+(* subpoly rounds rational bounds to integers (ceil below, floor above), which
+   is sound for integer-valued expressions; compare against polyhedra's
+   rational bounds rounded the same way *)
+let q_ceil q = Z.cdiv (Q.num q) (Q.den q)
+let q_floor q = Z.fdiv (Q.num q) (Q.den q)
+
+let diff_violation (t: D.t) p (queries: linexp list) : string option =
+  if poly_is_bot p then None (* empty is contained in anything *)
+  else if D.is_bot_env t then Some "subpoly is bottom but polyhedra is not"
+  else
+    List.find_map (fun e ->
+        let texpr1 = Apron.Texpr1.of_expr (D.env t) (texpr_of e) in
+        let (lo, hi) = D.Bounds.bound_texpr t texpr1 in
+        let itv = Apron.Abstract1.bound_texpr poly_man p (poly_texpr1 e) in
+        let plo = q_of_scalar itv.Apron.Interval.inf in
+        let phi = q_of_scalar itv.Apron.Interval.sup in
+        let lo_ok = match lo with
+          | None -> true
+          | Some l -> (match plo with Some pl -> Z.leq l (q_ceil pl) | None -> false)
+        in
+        let hi_ok = match hi with
+          | None -> true
+          | Some u -> (match phi with Some pu -> Z.leq (q_floor pu) u | None -> false)
+        in
+        if lo_ok && hi_ok then None
+        else
+          let str f = function None -> "inf" | Some b -> f b in
+          Some (Printf.sprintf "%s: subpoly bounds [%s, %s] tighter than polyhedra [%s, %s]"
+                  (show_linexp e)
+                  (str Z.to_string lo) (str Z.to_string hi)
+                  (str Q.to_string plo) (str Q.to_string phi))
+      ) queries
+
+(* same shape as gen_op, minus WidenWith *)
+let gen_diff_op : op Gen.t =
+  Gen.(fix (fun self depth ->
+      let leaf = oneof [
+          map2 (fun i e -> Assign (i, e)) (int_bound 2) gen_linexp;
+          map2 (fun ty e -> Guard (ty, e)) (int_bound 3) gen_linexp;
+          map (fun i -> Forget i) (int_bound 2);
+        ]
+      in
+      if depth = 0 then leaf
+      else
+        oneof_weighted [
+          6, leaf;
+          1, map (fun ops -> JoinWith ops) (list_size (int_bound 4) (self (depth - 1)));
+          1, map (fun ops -> MeetWith ops) (list_size (int_bound 4) (self (depth - 1)));
+        ]
+    ) 2)
+
+let var_queries : linexp list = [(0, [1; 0; 0]); (0, [0; 1; 0]); (0, [0; 0; 1])]
+
+let poly_diff =
+  test ~count:300 "never tighter than polyhedra"
+    (QCheck.make
+       ~print:(fun (ops, qs) ->
+           Printf.sprintf "trace:\n  %s\nqueries: %s"
+             (String.concat ";\n  " (List.map show_op ops))
+             (String.concat "; " (List.map show_linexp qs)))
+       Gen.(pair (list_size (int_bound 12) gen_diff_op) (list_size (return 3) gen_linexp)))
+    (fun (ops, qs) ->
+       let (t, p, _) =
+         List.fold_left (fun (t, p, step) op ->
+             let t' = apply t op in
+             let p' = poly_apply p op in
+             (match diff_violation t' p' var_queries with
+              | None -> ()
+              | Some msg ->
+                Test.fail_reportf "polyhedra refutes subpoly at step %d after %s: %s@.state: %s"
+                  step (show_op op) msg (D.show t'));
+             (t', p', step + 1)
+           ) (base, poly_base, 0) ops
+       in
+       match diff_violation t p qs with
+       | None -> true
+       | Some msg ->
+         Test.fail_reportf "polyhedra refutes subpoly at end of trace: %s@.state: %s" msg (D.show t))
+
 let tests =
   E.tests @ Le.tests @ J.tests @ M.tests @ B.tests @ T.tests @ C.tests @ W.tests @ N.tests
-  @ [invariants_state; invariants_ops; widen_chain; soundness_oracle; bounds_oracle]
+  @ [invariants_state; invariants_ops; widen_chain; soundness_oracle; bounds_oracle; poly_diff]
 
 let test () =
   "subPolyhedraDomain" >::: QCheck_ounit.to_ounit2_test_list tests
