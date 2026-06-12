@@ -277,7 +277,7 @@ struct
   let to_yojson _ = failwith "SubPolyhedraDomain.to_yojson: not implemented"
 
 
-    (* pretty printing *)
+  (* pretty printing *)
   let show (t: t) =
     let env = Environment.show t.env in
     match t.d with
@@ -357,8 +357,19 @@ struct
   let forget_var (t: t) (v: V.t) = forget_vars t [v]
   
 
+    
   
-  let assign_texpr _t _var _texpr = failwith "SubPolyhedraDomain.assign_texpr: not implemented"
+  let assign_texpr (t: VarManagement.t) var texp =
+    match t.d with
+    | None -> t
+    | Some d ->
+      let var_i = Environment.dim_of_var t.env var (* this is the variable we are assigning to *) in
+      begin match VarManagement.simplified_monomials_from_texp t texp with
+        | Some (terms, c) when List.exists (fun (_, var) -> Var.equal var var_i) terms -> failwith "todo"
+        | Some (terms, c) -> failwith "todo"
+        | _ -> forget_vars t [var] (* all other cases: var := texp, where texp is not of any form we can handle, so we forget var *)
+      end
+  
   (*< Copy-pasted from ltve >*)
   let assign_exp ask (t: VarManagement.t) var exp (no_ov: bool Lazy.t) : VarManagement.t =
     let t = if not @@ Environment.mem_var t.env var then add_vars t [var] else t in
