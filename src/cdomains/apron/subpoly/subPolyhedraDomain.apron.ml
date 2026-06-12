@@ -242,6 +242,50 @@ struct
       if Option.is_none (P.propagate ~size:(size t) d) then bot_env else t
 
   (* ---------------------------------------------------------------------- *)
+  (* Structural invariant checking *)
+
+  (** Structural invariant violations of a state; an empty list means the
+      state is healthy. Combines the core checks (rref shape, defining rows
+      implied, slack metadata well-formed, intervals non-empty) with the
+      environment-level invariant that every slack dimension is canonically
+      named after its info. Used by the unit tests, and asserted after every
+      operation when [dbg.subpoly.check-invariants] is enabled. *)
+  let check_invariants (t: t) : string list =
+    match t.d with
+    | None -> []
+    | Some d ->
+      let sz = size t in
+      let is_slack dim = is_slack_var (Environment.var_of_dim t.env dim) in
+      let core = P.invariant_violations ~size:sz ~is_slack d in
+      let naming =
+        P.VarMap.fold (fun beta (info: P.info) acc ->
+            if List.exists (fun (v, _) -> v >= sz) info.P.iterms || beta >= sz then acc (* out of range, reported by core *)
+            else
+              let name = Var.to_string (Environment.var_of_dim t.env beta) in
+              let expected = slack_name (vterms_of_dims t.env info.P.iterms) info.P.iconst in
+              if String.equal name expected then acc
+              else Printf.sprintf "slack %s is not canonically named (expected %s)" name expected :: acc
+          ) d.P.infos []
+      in
+      core @ naming
+
+  (** Whether to assert the structural invariants after every operation.
+      The config may be unavailable (e.g. in unit tests, which call
+      [check_invariants] directly instead); treat that as disabled. *)
+  let invariant_checking_enabled =
+    lazy (try GobConfig.get_bool "dbg.subpoly.check-invariants" with _ -> false)
+
+  let verify (op: string) (res: t) : t =
+    if Lazy.force invariant_checking_enabled then begin
+      match check_invariants res with
+      | [] -> ()
+      | vs ->
+        failwith (Printf.sprintf "subpoly invariant violation after %s: %s; state: %s"
+                    op (String.concat "; " vs) (show res))
+    end;
+    res
+
+  (* ---------------------------------------------------------------------- *)
   (* Slack templates.
 
      [constrain_template t vts iv] constrains the normalized linear form
@@ -399,6 +443,8 @@ struct
     let t = rescue_dependent_slacks t vars dep in
     VarManagement.remove_vars t (dep @ vars)
 
+  let remove_vars t vars = verify "remove_vars" (remove_vars t vars)
+
   let remove_vars_with (t: t) vars =
     let t' = remove_vars t vars in
     t.d <- t'.d;
@@ -429,6 +475,8 @@ struct
         in
         if ghosts = [] then t else VarManagement.remove_vars t ghosts
 
+  let keep_filter t f = verify "keep_filter" (keep_filter t f)
+
   let keep_vars (t: t) vs =
     keep_filter t (fun v -> List.mem v vs)
 
@@ -452,7 +500,7 @@ struct
   let forget_vars t vars =
     let res = forget_vars t vars in
     if M.tracing then M.tracel "ops" "forget_vars %s -> %s" (show t) (show res);
-    res
+    verify "forget_vars" res
 
   let forget_var (t: t) (v: V.t) = forget_vars t [v]
 
@@ -526,6 +574,8 @@ struct
 
   let meet a b = Timing.wrap "meet" (meet a) b
 
+  let meet a b = verify "meet" (meet a b)
+
   let leq (a: t) (b: t) =
     if is_bot_env a then true
     else if is_bot_env b then false
@@ -594,7 +644,7 @@ struct
             let joined_m =
               if Matrix.is_empty sa.P.affeq || Matrix.is_empty sb.P.affeq then Matrix.empty ()
               else if Matrix.equal sa.P.affeq sb.P.affeq then sa.P.affeq
-              else Matrix.linear_disjunct sa.P.affeq sb.P.affeq
+              else P.affine_hull ~size:sz sa.P.affeq sb.P.affeq
             in
             let intervals = P.join_intervals ra rb in
             let infos = P.VarMap.union (fun _ x _ -> Some x) sa.P.infos sb.P.infos in
@@ -618,6 +668,8 @@ struct
 
   let join a b = Timing.wrap "join" (join a) b
 
+  let join a b = verify "join" (join a b)
+
   let widen (a: t) (b: t) =
     if is_bot_env a then b
     else if is_bot_env b then a
@@ -640,7 +692,7 @@ struct
             let widened_m =
               if Matrix.is_empty da.P.affeq || Matrix.is_empty sb.P.affeq then Matrix.empty ()
               else if Matrix.equal da.P.affeq sb.P.affeq then da.P.affeq
-              else Matrix.linear_disjunct da.P.affeq sb.P.affeq
+              else P.affine_hull ~size:sz da.P.affeq sb.P.affeq
             in
             let intervals = P.widen_intervals da.P.intervals rb in
             let infos = P.VarMap.union (fun _ x _ -> Some x) da.P.infos sb.P.infos in
@@ -657,7 +709,7 @@ struct
   let widen a b =
     let res = widen a b in
     if M.tracing then M.tracel "widen" "widen a: %s b: %s -> %s" (show a) (show b) (show res);
-    res
+    verify "widen" res
 
   let narrow (a: t) (b: t) =
     if is_bot_env a then a
@@ -670,6 +722,8 @@ struct
       (* project back onto a's dimensions: the narrowed state keeps a's rows *)
       let extra = List.filter (fun v -> not (Environment.mem_var a_env v)) (Environment.ivars_only sup_env) in
       if extra = [] then res else VarManagement.remove_vars res extra
+
+  let narrow a b = verify "narrow" (narrow a b)
 
   let unify a b =
     meet a b
@@ -830,6 +884,8 @@ struct
 
   let assign_texpr t var texp = Timing.wrap "assign_texpr" (assign_texpr t var) texp
 
+  let assign_texpr t var texp = verify "assign_texpr" (assign_texpr t var texp)
+
   let assign_exp ask (t: VarManagement.t) var exp (no_ov: bool Lazy.t) : VarManagement.t =
     let t = if not @@ Environment.mem_var t.env var then add_vars t [var] else t in
     match Convert.texpr1_expr_of_cil_exp ask t t.env exp no_ov with
@@ -960,6 +1016,8 @@ struct
 
   let meet_tcons t tcons = Timing.wrap "meet_tcons" (meet_tcons t) tcons
 
+  let meet_tcons t tcons = verify "meet_tcons" (meet_tcons t tcons)
+
   (** Backwards semantics of [var := exp]. When [var] does not occur in [exp],
       this is: meet with [var = exp], then havoc [var]. Meeting first lets the
       removal machinery re-express slack constraints on [var] over the
@@ -989,7 +1047,7 @@ struct
   let substitute_exp ask t var exp no_ov =
     let res = substitute_exp ask t var exp no_ov in
     if M.tracing then M.tracel "ops" "Substitute_expr t: \n %s \n var: %a \n exp: %a \n -> \n %s" (show t) Var.pretty var d_exp exp (show res);
-    res
+    verify "substitute_exp" res
 
   let assert_constraint ask (d: t) e negate (no_ov: bool Lazy.t) =
     match Convert.tcons1_of_cil_exp ask d d.env e negate no_ov with

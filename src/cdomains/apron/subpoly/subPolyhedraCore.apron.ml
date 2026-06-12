@@ -259,6 +259,41 @@ module SubPoly (Var : Var) (I : IntervalSig with type bound = Q.t) = struct
   let dropped_rows (m: affeq) (joined: affeq) : CoeffVector.t list =
     List.filter (fun r -> not (row_implied_by joined r)) (rows m)
 
+  (** Affine hull (join) of two consistent equality systems, computed exactly:
+      an equality is valid on the union iff it is implied by each operand, so
+      the hull's row space is the intersection of the two augmented row
+      spaces, computed with the Zassenhaus algorithm.
+
+      Not the library's [Matrix.linear_disjunct], which loses rows when the
+      pivot structures of the operands differ (e.g. the hull of [y=-4] and
+      [x-z=-5; y=-4] comes out empty instead of [y=-4]). *)
+  let affine_hull ~(size: int) (m1: affeq) (m2: affeq) : affeq =
+    let w = size + 1 in
+    (* (u | u) for rows of m1, (v | 0) for rows of m2 *)
+    let dup r =
+      let es = CoeffVector.to_sparse_list r in
+      CoeffVector.of_sparse_list (2 * w) (es @ List.map (fun (i, c) -> (i + w, c)) es)
+    in
+    let left r = CoeffVector.of_sparse_list (2 * w) (CoeffVector.to_sparse_list r) in
+    let big = List.fold_left (fun m r ->
+        match Matrix.rref_vec m r with
+        | Some m -> m
+        | None -> m (* unreachable: a contradiction row cannot arise from consistent operands *)
+      ) (Matrix.empty ()) (List.map dup (rows m1) @ List.map left (rows m2))
+    in
+    (* rows with zero left half: their right halves span the intersection *)
+    List.fold_left (fun m r ->
+        match CoeffVector.find_first_non_zero r with
+        | Some (p, _) when p >= w ->
+          let row = CoeffVector.of_sparse_list w
+              (List.map (fun (i, c) -> (i - w, c)) (CoeffVector.to_sparse_list r))
+          in
+          (match Matrix.rref_vec m row with
+           | Some m -> m
+           | None -> m (* unreachable: the hull of nonempty sets is consistent *))
+        | _ -> m
+      ) (Matrix.empty ()) (rows big)
+
   (** Rewrites an RHS-form row into an equivalent one over program dimensions
       only, substituting every slack by its defining linear form. Only valid on
       states where the defining equalities hold. *)
@@ -405,6 +440,81 @@ module SubPoly (Var : Var) (I : IntervalSig with type bound = Q.t) = struct
     let new_intervals =
       VarMap.fold (fun var interval acc -> VarMap.add (shift var) interval acc) new_t.intervals VarMap.empty in
     {affeq = new_affeq; infos = new_infos; intervals = new_intervals}
+
+  (* ---------------------------------------------------------------------- *)
+  (* Structural invariant checking (for tests and debugging) *)
+
+  (** Checks the structural invariants of a state and returns a human-readable
+      message per violation; an empty list means all invariants hold.
+      [is_slack] classifies dimensions into slack and program dimensions.
+
+      Checked invariants:
+      - the matrix is in rref: rows of length [size + 1] without zero or
+        contradiction rows, pivots are 1 with strictly increasing positions,
+        and every pivot column is zero in all other rows;
+      - infos are keyed by slack dimensions and mention only in-range program
+        dimensions, with strictly sorted, nonzero terms;
+      - the defining row of every slack is implied by the matrix;
+      - intervals are keyed by in-range dimensions and are non-empty. *)
+  let invariant_violations ~(size: int) ~(is_slack: Var.t -> bool) (t: t) : string list =
+    let violations = ref [] in
+    let add fmt = Printf.ksprintf (fun s -> violations := s :: !violations) fmt in
+    let rs = rows t.affeq in
+    List.iteri (fun i r ->
+        if CoeffVector.length r <> size + 1 then
+          add "row %d has length %d, expected %d" i (CoeffVector.length r) (size + 1)
+      ) rs;
+    let pivots = List.mapi (fun i r -> (i, CoeffVector.find_first_non_zero r)) rs in
+    List.iter (fun (i, p) ->
+        match p with
+        | None -> add "row %d is a zero row" i
+        | Some (p, pv) ->
+          if p >= size then add "row %d is a contradiction row" i
+          else if pv <>: Mpqf.one then add "row %d has pivot value %s, expected 1" i (Mpqf.to_string pv)
+      ) pivots;
+    let rec check_increasing = function
+      | (i, Some (p, _)) :: (((_, Some (q, _)) :: _) as rest) ->
+        if p >= q then add "pivot of row %d is not left of the next row's pivot" i;
+        check_increasing rest
+      | _ :: rest -> check_increasing rest
+      | [] -> ()
+    in
+    check_increasing pivots;
+    List.iter (fun (i, p) ->
+        match p with
+        | Some (p, _) when p < size ->
+          List.iteri (fun j r ->
+              if j <> i && CoeffVector.nth r p <>: Mpqf.zero then
+                add "pivot column %d of row %d is nonzero in row %d" p i j
+            ) rs
+        | _ -> ()
+      ) pivots;
+    VarMap.iter (fun beta info ->
+        let b = Var.string_of beta in
+        if Var.to_int beta >= size then add "info key %s is out of range" b;
+        if not (is_slack beta) then add "info key %s is not a slack dimension" b;
+        if info.iterms = [] then add "info of %s has no terms" b;
+        List.iter (fun (v, c) ->
+            if Var.to_int v >= size then add "info of %s mentions out-of-range dimension %s" b (Var.string_of v);
+            if is_slack v then add "info of %s mentions slack dimension %s" b (Var.string_of v);
+            if c =: Mpqf.zero then add "info of %s has a zero coefficient for %s" b (Var.string_of v)
+          ) info.iterms;
+        let rec sorted = function
+          | (v, _) :: (((w, _) :: _) as rest) -> Var.compare v w < 0 && sorted rest
+          | _ -> true
+        in
+        if not (sorted info.iterms) then add "info terms of %s are not strictly sorted" b;
+        if Var.to_int beta < size && not (row_implied_by t.affeq (defining_row size beta info)) then
+          add "defining row of %s is not implied by the matrix" b
+      ) t.infos;
+    VarMap.iter (fun v iv ->
+        if Var.to_int v >= size then add "interval on out-of-range dimension %s" (Var.string_of v)
+        else
+          match I.bounds iv with
+          | Some l, Some u when Q.compare l u > 0 -> add "interval of %s is empty: %s" (Var.string_of v) (I.show iv)
+          | _ -> ()
+      ) t.intervals;
+    List.rev !violations
 
   (* ---------------------------------------------------------------------- *)
   (* Printing *)

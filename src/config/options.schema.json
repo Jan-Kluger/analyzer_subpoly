@@ -2128,6 +2128,19 @@
           },
           "additionalProperties": false
         },
+        "subpoly": {
+          "title": "dbg.subpoly",
+          "type": "object",
+          "properties": {
+            "check-invariants": {
+              "title": "dbg.subpoly.check-invariants",
+              "description": "Check the structural invariants of the subpolyhedra domain after every domain operation and fail on violation.",
+              "type": "boolean",
+              "default": false
+            }
+          },
+          "additionalProperties": false
+        },
         "dump": {
           "title": "dbg.dump",
           "description": "Dumps the results to the given path",
