@@ -15,7 +15,7 @@ let prog_vars = List.map GobApron.Var.of_string ["x"; "y"; "z"]
 let base = D.add_vars (D.top ()) prog_vars
 
 (* constant and one small coefficient per program variable *)
-type linexp = int * int list
+type linexp = int * int list [@@deriving show]
 
 type op =
   | Assign of int * linexp
@@ -24,6 +24,7 @@ type op =
   | JoinWith of op list
   | MeetWith of op list
   | WidenWith of op list
+[@@deriving show]
 
 let texpr_of ((k, cs): linexp) : Apron.Texpr1.expr =
   let open Apron.Texpr1 in
@@ -150,9 +151,161 @@ let widen_chain =
        in
        go a 50)
 
+(* Concrete-point soundness oracle.
+
+   A concrete integer point over the program variables is run through the same
+   operation trace as the abstract state; after every operation the point must
+   still lie in the concretization. Slack dimensions take the value of their
+   defining linear form, so membership is: every matrix row holds exactly and
+   every interval contains its dimension's value. *)
+
+module VM = SubPolyhedraDomain.VarManagement
+module P = VM.P
+module RI = Rationalinterval.RationalInterval
+
+let eval_linexp ((k, cs): linexp) (sigma: Q.t array) : Q.t =
+  List.fold_left (fun (acc, i) c -> (Q.add acc (Q.mul (Q.of_int c) sigma.(i)), i + 1))
+    (Q.of_int k, 0) cs
+  |> fst
+
+let mem_point (t: D.t) (sigma: Q.t array) : bool =
+  match t.VM.d with
+  | None -> false
+  | Some d ->
+    let env = D.env t in
+    let sz = GobApron.Environment.size env in
+    let prog_value dim =
+      match GobApron.Var.to_string (Apron.Environment.var_of_dim env dim) with
+      | "x" -> Some sigma.(0)
+      | "y" -> Some sigma.(1)
+      | "z" -> Some sigma.(2)
+      | _ -> None
+    in
+    (* slacks evaluate to their defining linear form; a slack without info
+       cannot be interpreted and is treated as a membership failure to make it
+       visible (generated states are not expected to contain any) *)
+    let dim_value dim =
+      match prog_value dim with
+      | Some q -> Some q
+      | None ->
+        match P.VarMap.find_opt dim d.P.infos with
+        | None -> None
+        | Some (info: P.info) ->
+          List.fold_left (fun acc (i, c) ->
+              match acc, prog_value i with
+              | Some acc, Some q -> Some (Q.add acc (Q.mul (P.q_of_mpqf c) q))
+              | _ -> None
+            ) (Some (P.q_of_mpqf info.P.iconst)) info.P.iterms
+    in
+    let row_ok r =
+      let terms, rhs = P.split_row sz r in
+      match
+        List.fold_left (fun acc (i, c) ->
+            match acc, dim_value i with
+            | Some acc, Some q -> Some (Q.add acc (Q.mul (P.q_of_mpqf c) q))
+            | _ -> None
+          ) (Some Q.zero) terms
+      with
+      | Some lhs -> Q.equal lhs (P.q_of_mpqf rhs)
+      | None -> false
+    in
+    let interval_ok dim iv =
+      match dim_value dim with
+      | None -> false
+      | Some q ->
+        let (l, u) = RI.bounds iv in
+        (match l with None -> true | Some l -> Q.leq l q)
+        && (match u with None -> true | Some u -> Q.leq q u)
+    in
+    List.for_all row_ok (P.rows d.P.affeq)
+    && P.VarMap.for_all interval_ok d.P.intervals
+
+let sat_guard ty (v: Q.t) =
+  match typ_of ty with
+  | Apron.Tcons1.EQ -> Q.equal v Q.zero
+  | Apron.Tcons1.SUPEQ -> Q.geq v Q.zero
+  | Apron.Tcons1.SUP -> Q.gt v Q.zero
+  | Apron.Tcons1.DISEQ -> not (Q.equal v Q.zero)
+  | _ -> false
+
+(* Lockstep application: every step keeps sigma in gamma(t). Guards the point
+   does not satisfy are skipped on both sides (that path is infeasible for this
+   point); the havoc value of Forget comes with the trace; MeetWith is skipped
+   because the point need not lie in the other operand. *)
+let sound_apply ((t, sigma): D.t * Q.t array) ((op, fresh): op * int) : D.t * Q.t array =
+  match op with
+  | Assign (i, e) ->
+    let sigma' = Array.copy sigma in
+    sigma'.(i) <- eval_linexp e sigma;
+    (D.assign_texpr t (List.nth prog_vars i) (texpr_of e), sigma')
+  | Guard (ty, e) ->
+    if not (D.is_bot_env t) && sat_guard ty (eval_linexp e sigma) then
+      let texpr1 = Apron.Texpr1.of_expr (D.env t) (texpr_of e) in
+      (D.meet_tcons t (Apron.Tcons1.make texpr1 (typ_of ty)), sigma)
+    else (t, sigma)
+  | Forget i ->
+    let sigma' = Array.copy sigma in
+    sigma'.(i) <- Q.of_int fresh;
+    (D.forget_vars t [List.nth prog_vars i], sigma')
+  | JoinWith ops -> (D.join t (run ops), sigma)
+  | WidenWith ops -> (D.widen t (D.join t (run ops)), sigma)
+  | MeetWith _ -> (t, sigma)
+
+let gen_trace : ((op * int) list * int array) Gen.t =
+  Gen.(pair
+         (list_size (int_bound 12) (pair gen_op (int_range (-20) 20)))
+         (map Array.of_list (list_size (return 3) (int_range (-20) 20))))
+
+let print_trace ((trace, init): (op * int) list * int array) =
+  Printf.sprintf "init: [%s]\ntrace:\n  %s"
+    (String.concat "; " (List.map string_of_int (Array.to_list init)))
+    (String.concat ";\n  " (List.map (fun (op, f) -> show_op op ^ " (fresh " ^ string_of_int f ^ ")") trace))
+
+let run_trace (trace, init) =
+  List.fold_left (fun (t, sigma, step) opf ->
+      let (t', sigma') = sound_apply (t, sigma) opf in
+      if not (mem_point t' sigma') then
+        Test.fail_reportf "concrete point escaped at step %d after %s@.point: [%s]@.state: %s"
+          step (show_op (fst opf))
+          (String.concat "; " (List.map Q.to_string (Array.to_list sigma')))
+          (D.show t')
+      else (t', sigma', step + 1)
+    ) (base, Array.map Q.of_int init, 0) trace
+
+let soundness_oracle =
+  test ~count:300 "concrete execution stays in abstraction"
+    (QCheck.make ~print:print_trace gen_trace)
+    (fun tr -> ignore (run_trace tr); true)
+
+(* the bounds query must contain the concrete value of the expression *)
+let bounds_oracle =
+  test ~count:300 "expression bounds contain concrete value"
+    (QCheck.make
+       ~print:(fun (tr, q) -> print_trace tr ^ "\nquery: " ^ show_linexp q)
+       (Gen.pair gen_trace gen_linexp))
+    (fun (tr, q) ->
+       let (t, sigma, _) = run_trace tr in
+       if D.is_bot_env t then true
+       else begin
+         let texpr1 = Apron.Texpr1.of_expr (D.env t) (texpr_of q) in
+         let (lo, hi) = D.Bounds.bound_texpr t texpr1 in
+         let v = eval_linexp q sigma in
+         let vz = Q.num v in (* sigma is integral, so v is too *)
+         let ok =
+           (match lo with None -> true | Some l -> Z.leq l vz)
+           && (match hi with None -> true | Some u -> Z.leq vz u)
+         in
+         if not ok then
+           Test.fail_reportf "bounds [%s, %s] miss concrete value %s@.state: %s"
+             (match lo with None -> "-inf" | Some l -> Z.to_string l)
+             (match hi with None -> "inf" | Some u -> Z.to_string u)
+             (Q.to_string v) (D.show t)
+         else true
+       end)
+
 let tests =
   E.tests @ Le.tests @ J.tests @ M.tests @ B.tests @ T.tests @ C.tests @ W.tests @ N.tests
-  @ [invariants_state; invariants_ops; widen_chain]
+  @ [invariants_state; invariants_ops; widen_chain; soundness_oracle; bounds_oracle]
 
 let test () =
   "subPolyhedraDomain" >::: QCheck_ounit.to_ounit2_test_list tests
