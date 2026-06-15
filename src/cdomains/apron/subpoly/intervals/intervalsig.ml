@@ -53,6 +53,12 @@ module type IntervalSig = sig
       did not grow in [new] and drops the others to infinity. *)
   val widen : t -> t -> t
 
+  (** Widening with thresholds: like [widen], but an unstable bound snaps to
+      the nearest threshold still covering the new bound ([lower] must return
+      the largest threshold [<=] its argument, [upper] the smallest threshold
+      [>=] its argument) instead of jumping to infinity. *)
+  val widen_thresholds : lower:(bound -> bound option) -> upper:(bound -> bound option) -> t -> t -> t
+
   (** Standard interval narrowing: [narrow a b] refines only the infinite
       bounds of [a] with the corresponding bounds of [b]. *)
   val narrow : t -> t -> t

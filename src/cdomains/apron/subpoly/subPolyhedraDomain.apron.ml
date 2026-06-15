@@ -241,6 +241,17 @@ struct
     | Some d ->
       if Option.is_none (P.propagate ~size:(size t) d) then bot_env else t
 
+  (** Reduction: materializes the interval refinement implied by the equality
+      rows into the state, so the information survives the projection of the
+      variable the constraint was stated on (e.g. [g#in] of a global read). *)
+  let reduce_intervals (t: t) : t =
+    match t.d with
+    | None -> t
+    | Some d ->
+      match P.propagate ~size:(size t) d with
+      | None -> bot_env
+      | Some m -> { t with d = Some { d with P.intervals = m } }
+
   (* ---------------------------------------------------------------------- *)
   (* Structural invariant checking *)
 
@@ -286,6 +297,30 @@ struct
     res
 
   (* ---------------------------------------------------------------------- *)
+  (* Threshold widening.
+
+     Reuses the program-constant thresholds collected by [WideningThresholds],
+     like the Apron domains, gated on the same option. The config may be
+     unavailable (e.g. in unit tests); treat that as disabled. *)
+
+  let widening_thresholds =
+    ResettableLazy.from_fun (fun () ->
+        let enabled = try GobConfig.get_bool "ana.apron.threshold_widening" with _ -> false in
+        if not enabled then None
+        else
+          let lts = ResettableLazy.force WideningThresholds.lower_thresholds in
+          let uts = ResettableLazy.force WideningThresholds.upper_thresholds in
+          let lower b = Option.map Q.of_bigint (WideningThresholds.Thresholds.find_last_opt (fun x -> Q.geq b (Q.of_bigint x)) lts) in
+          let upper b = Option.map Q.of_bigint (WideningThresholds.Thresholds.find_first_opt (fun x -> Q.leq b (Q.of_bigint x)) uts) in
+          Some (lower, upper))
+
+  (** [interval_widen old new]: interval widening, with thresholds if enabled. *)
+  let interval_widen (old_iv: RationalInterval.t) (new_iv: RationalInterval.t) : RationalInterval.t =
+    match ResettableLazy.force widening_thresholds with
+    | Some (lower, upper) -> RationalInterval.widen_thresholds ~lower ~upper old_iv new_iv
+    | None -> RationalInterval.widen old_iv new_iv
+
+  (* ---------------------------------------------------------------------- *)
   (* Slack templates.
 
      [constrain_template t vts iv] constrains the normalized linear form
@@ -320,7 +355,7 @@ struct
                   (* the candidate already covers both operands; widen against the
                      current interval (if any) so chains stay ascending *)
                   if RationalInterval.is_top current then cand
-                  else RationalInterval.widen current cand
+                  else interval_widen current cand
               in
               (* re-establish the defining row: a preceding hull may have dropped
                  it (e.g. the old operand of a widening did not contain the slack) *)
@@ -694,13 +729,13 @@ struct
               else if Matrix.equal da.P.affeq sb.P.affeq then da.P.affeq
               else P.affine_hull ~size:sz da.P.affeq sb.P.affeq
             in
-            let intervals = P.widen_intervals da.P.intervals rb in
+            let intervals = P.widen_intervals ?thresholds:(ResettableLazy.force widening_thresholds) da.P.intervals rb in
             let infos = P.VarMap.union (fun _ x _ -> Some x) da.P.infos sb.P.infos in
             let res = { d = Some { P.affeq = widened_m; P.intervals = intervals; P.infos = infos }; env = sup_env } in
             (* recovery of equalities dropped from the old state, with interval widening *)
             let recs = recovery_candidates sup_env sz da sb rb widened_m in
             let res = List.fold_left (fun res (vts, c, j) ->
-                let iv = RationalInterval.widen (RationalInterval.of_const c) j in
+                let iv = interval_widen (RationalInterval.of_const c) j in
                 constrain_template TWiden res vts iv
               ) res recs
             in
@@ -1014,6 +1049,11 @@ struct
           in
           check_bot t
 
+  (* materialize the implied interval refinements: constraints are stated on
+     short-lived [g#in]-style variables, whose bounds must reach the variables
+     that survive *)
+  let meet_tcons t tcons = reduce_intervals (meet_tcons t tcons)
+
   let meet_tcons t tcons = Timing.wrap "meet_tcons" (meet_tcons t) tcons
 
   let meet_tcons t tcons = verify "meet_tcons" (meet_tcons t tcons)
@@ -1066,6 +1106,7 @@ struct
 
   let eval_interval _ask = Bounds.bound_texpr
 
+  (*TODO: Incomplete, it drops all ineqs and only outputs eqs.*)
   let invariant (t: t) =
     match t.d with
     | None -> []

@@ -125,6 +125,7 @@ module SubPoly (Var : Var) (I : IntervalSig with type bound = Q.t) = struct
 
   (* ---------------------------------------------------------------------- *)
   (* Reduction: interval propagation through the equality rows.
+     TODO: Implement simplex and linear basis exploration for better precision
 
      This is a cheap, sound reduction in the spirit of the Simplex-based
      reduction of the paper: for every row [sum a_i x_i = c] and every variable
@@ -323,9 +324,13 @@ module SubPoly (Var : Var) (I : IntervalSig with type bound = Q.t) = struct
         | _ -> None
       ) a b
 
-  let widen_intervals (a: interval_map) (b: interval_map) : interval_map =
+  let widen_intervals ?thresholds (a: interval_map) (b: interval_map) : interval_map =
+    let widen = match thresholds with
+      | Some (lower, upper) -> I.widen_thresholds ~lower ~upper
+      | None -> I.widen
+    in
     VarMap.filter_map (fun k x ->
-        let w = I.widen x (get_iv b k) in
+        let w = widen x (get_iv b k) in
         if I.is_top w then None else Some w
       ) a
 

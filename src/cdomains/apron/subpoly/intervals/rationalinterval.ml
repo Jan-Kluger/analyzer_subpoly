@@ -140,6 +140,16 @@ module RationalInterval : Intervalsig.IntervalSig with type bound = Q.t = struct
      | Some a, Some b when Q.leq b a -> Some a
      | _ -> None)
 
+  let widen_thresholds ~(lower : bound -> bound option) ~(upper : bound -> bound option) ((l1, u1) : t) ((l2, u2) : t) =
+    (match l1, l2 with
+     | Some a, Some b when Q.geq b a -> Some a
+     | Some _, Some b -> lower b
+     | _ -> None),
+    (match u1, u2 with
+     | Some a, Some b when Q.leq b a -> Some a
+     | Some _, Some b -> upper b
+     | _ -> None)
+
   (* narrow *)
 
   let narrow ((l1, u1) : t) ((l2, u2) : t) =

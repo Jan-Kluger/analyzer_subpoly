@@ -25,7 +25,7 @@ int main(void) {
     y = z;
 
     __goblint_check(x == y + 2); // UNKNOWN!
-    __goblint_check(x >= 2);     // UNKNOWN!
+    __goblint_check(x >= 2);     // SUCCESS (x unchanged; reduction keeps its bound when y is havocked)
 
     return 0;
 }
