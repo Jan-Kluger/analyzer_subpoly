@@ -197,6 +197,13 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
   let leq (a: t) (b: t) =
     equal a b || is_empty b
 
+   (**[join a b] returns a subpolyhedra resulting from the join of two subpolyhedras a and b.
+
+   General Structure:
+   Incoming a, b:
+   check if one is bottom -> Return bottom
+   
+   *) 
   let join (a: t) (b: t) =
     if equal a b then a else empty ()
 

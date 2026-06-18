@@ -310,7 +310,26 @@ struct
     (* bis hier: macht mann das immer so -> Rückgabewerte in AffineEq anschauen *)
     failwith "SubPolyhedraDomain.leq: not implemented"
   (*</ Copy-pasted from octagons >*)
-  let join _a _b = failwith "SubPolyhedraDomain.join: not implemented"
+  
+  (*< Copy-pasted from affineEq>*)
+  let join a b =
+    if is_bot a then
+      b
+    else if is_bot b then
+      a
+    else
+      match Option.get a.d, Option.get b.d with
+      | x, y when is_top_env a || is_top_env b -> {d = Some (Matrix.empty ()); env = Environment.lce a.env b.env}
+      | x, y when (Environment.cmp a.env b.env <> 0) ->
+        let sup_env = Environment.lce a.env b.env in
+        let mod_x = dim_add (Environment.dimchange a.env sup_env) x in
+        let mod_y = dim_add (Environment.dimchange b.env sup_env) y in
+        {d = Some (Matrix.linear_disjunct mod_x mod_y); env = sup_env}
+      | x, y when Matrix.equal x y -> {d = Some x; env = a.env}
+      | x, y  -> {d = Some(Matrix.linear_disjunct x y); env = a.env}
+  (*</ Copy-pasted from affineEq>*)
+      
+    failwith "SubPolyhedraDomain.join: not implemented"
 
 
  (* Copy-pasted from octagons for reference:
@@ -368,10 +387,10 @@ struct
   (*</ Copy-pasted from ltve >*)
 
   (*< Copy-pasted from ltve >*)
-  let assign_var (t: VarManagement.t) v v' =
-    let t = add_vars t [v; v'] in
+  let assign_var (t: VarManagement.t) v v' = failwith "TODO"
+    (*let t = add_vars t [v; v'] in
     assign_texpr t v (Var v') (* TODO Leonie: Find mistake *)
-  (*</ Copy-pasted from ltve >*)
+  (*</ Copy-pasted from ltve >*)*)
 
   (*< Copy-pasted from ltve >*)
   let assign_var_parallel t vv's =
