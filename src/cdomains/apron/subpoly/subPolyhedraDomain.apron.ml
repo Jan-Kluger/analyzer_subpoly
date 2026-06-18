@@ -357,8 +357,6 @@ struct
   let forget_var (t: t) (v: V.t) = forget_vars t [v]
   
 
-    
-  
   let assign_texpr (t: VarManagement.t) var texp =
     match t.d with
     | None -> t
