@@ -357,14 +357,18 @@ struct
   let forget_var (t: t) (v: V.t) = forget_vars t [v]
   
 
+  let substitute_expr (t: t) (v: V.t) (terms: (Z.t * int) list) (c: Z.t) = failwith "SubPolyhedraDomain.substitute_expr: not implemented"
+  let add_equation (t: t) (terms: (Z.t * int) list) (c: Z.t) = failwith "SubPolyhedraDomain.add_equation: not implemented"
+
+  
   let assign_texpr (t: VarManagement.t) var texp =
     match t.d with
     | None -> t
     | Some d ->
       let var_i = Environment.dim_of_var t.env var (* this is the variable we are assigning to *) in
       begin match VarManagement.simplified_monomials_from_texp t texp with
-        | Some (terms, c) when List.exists (fun (_, var) -> Var.equal var var_i) terms -> failwith "todo"
-        | Some (terms, c) -> failwith "todo"
+        | Some (terms, c) when List.exists (fun (_, var) -> var = var_i) terms -> substitute_expr t var terms c
+        | Some (terms, c) -> add_equation t terms c
         | _ -> forget_vars t [var] (* all other cases: var := texp, where texp is not of any form we can handle, so we forget var *)
       end
   
