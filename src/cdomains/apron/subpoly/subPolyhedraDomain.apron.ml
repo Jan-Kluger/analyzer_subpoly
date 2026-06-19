@@ -296,6 +296,8 @@ struct
   let is_top (t: t) = GobOption.exists SubPolyDomain.is_empty t.d
   let is_bot = is_bot_env
 
+  let is_top_env t = (not @@ Environment.equal t.env empty_env) && is_top t
+
 
   (* fixpoint iteration handling *)
   (* here we wire up the things from Core *)
@@ -311,26 +313,28 @@ struct
     failwith "SubPolyhedraDomain.leq: not implemented"
   (*</ Copy-pasted from octagons >*)
   
-  (*< Copy-pasted from affineEq>*)
+(**
+[join a b ] joins two subpolyhedra. It adapts the apron environment so that both share the 
+same indices. Then it calls SubPolyDomain.join on the updated subpolyhedra. Adapted from ltve.
+*)
   let join a b =
-    if is_bot a then
-      b
-    else if is_bot b then
-      a
-    else
-      match Option.get a.d, Option.get b.d with
-      | x, y when is_top_env a || is_top_env b -> {d = Some (Matrix.empty ()); env = Environment.lce a.env b.env}
-      | x, y when (Environment.cmp a.env b.env <> 0) ->
-        let sup_env = Environment.lce a.env b.env in
-        let mod_x = dim_add (Environment.dimchange a.env sup_env) x in
-        let mod_y = dim_add (Environment.dimchange b.env sup_env) y in
-        {d = Some (Matrix.linear_disjunct mod_x mod_y); env = sup_env}
-      | x, y when Matrix.equal x y -> {d = Some x; env = a.env}
-      | x, y  -> {d = Some(Matrix.linear_disjunct x y); env = a.env}
-  (*</ Copy-pasted from affineEq>*)
-      
-    failwith "SubPolyhedraDomain.join: not implemented"
+    if is_bot a then b
+    else if is_bot b then a
+    else 
+      let sup_env = Environment.lce a.env b.env in
+      match a.d, b.d with 
+      | None, _ -> b
+      | _, None -> a
+      | Some x, Some y when is_top_env a || is_top_env b ->
+       {d = Some (SubPolyDomain.empty ()); env = sup_env}
+      | Some x, Some y when (Environment.cmp a.env b.env <> 0)->
+       let a = dim_add (Environment.dimchange a.env sup_env) x in
+       let b = dim_add (Environment.dimchange b.env sup_env) y in 
+       {d = Some (SubPolyDomain.join a  b); env = sup_env}
+      | Some x, Some y when SubPolyDomain.equal x y -> a
+      | Some x, Some y -> {d = Some (SubPolyDomain.join x y); env = a.env }
 
+     
 
  (* Copy-pasted from octagons for reference:
     let meet a b = (* same as join but calls cap instead of cup *)
