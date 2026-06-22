@@ -6,7 +6,7 @@ include Batteries
 
 (** Variable type used by the subpolyhedra core. *)
 module type Var = sig
-  type t [@@deriving hash]
+  type t = int [@@deriving hash] (*Added int here so we don't need Var.to_int everywhere. This most likely won't change to another type.*)
   val equal : t -> t -> bool
   val compare : t -> t -> int
   val string_of : t -> string
@@ -31,7 +31,7 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
 
   type affeq = Matrix.t [@@deriving eq, ord, hash] (*Our affine equality matrix.*)
   type interval_map = I.t VarMap.t [@@deriving eq, ord] (*Map from Var to Interval*)
-  type info = (Var.t * Mpqf.t) list [@@deriving eq, ord, hash] (*similar to sparse vector, might acutally use sparse vector here? QUESTION*)
+  type info = CoeffVector.t [@@deriving eq, ord, hash] (*similar to sparse vector, might acutally use sparse vector here? QUESTION*)
   type info_map = info VarMap.t [@@deriving eq, ord] (*Map from Var to info (maybe sparse vector)*)
 
   let hash_interval_map (m: interval_map) =
@@ -92,9 +92,9 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
 
     Used in forget_vars.
   *) 
-  let rem_infos_containing_var (slacks : info_map) (var : Var.t) : info_map = 
-     VarMap.filter (fun _ (info : info) -> not (List.mem var (List.map fst info))) slacks 
-
+  let rem_infos_containing_var (infos : info_map) (var : Var.t) : info_map = 
+     VarMap.filter (fun _ (info : info) -> CoeffVector.nth info (Var.to_int var) =: Mpqf.zero) infos
+  
   (**
     [forget_vars vars t] forgets a list of variables in the polyhedron.
 
@@ -120,13 +120,15 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
   let dim_add (ch: Apron.Dim.change) (t: t) = 
     let shift_index_add (old_index : Var.t) (occ_cols : (int * int) list) : Var.t = 
     (* find all entries that are less or equal to old_index in occ_cols, and count them (=k), then new_index = old_index + k , return new_index *)
-    (let k = List.fold_left (fun acc (index, count) -> if index <= (Var.to_int old_index) then acc + count else acc) 0 occ_cols
-    in let new_index = (Var.to_int old_index) + k 
+    (let k = List.fold_left (fun acc (index, count) -> if index <= old_index then acc + count else acc) 0 occ_cols
+    in let new_index = old_index + k 
     in Var.to_t new_index) in
     let new_infos_add (infos : info_map) occ_cols : info_map = 
     VarMap.fold(fun var info acc ->
       let new_var = shift_index_add var occ_cols in
-      let new_info = List.rev (List.fold_left (fun acc (v, c) -> (shift_index_add v occ_cols, c) :: acc) [] info) in
+      let (info_list : (Var.t * Mpqf.t) list) = CoeffVector.to_sparse_list info in
+      let set_infos acc (v, c) = CoeffVector.set_nth acc (shift_index_add v occ_cols) c in
+      let new_info = List.fold_left set_infos (CoeffVector.of_list []) info_list in
       VarMap.add new_var new_info acc) infos VarMap.empty in
     let new_intervals_add (intervals : interval_map) occ_cols : interval_map = 
     VarMap.fold( fun var interval acc ->
@@ -152,7 +154,7 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
     let new_infos_remove (infos : info_map) dim_list : info_map = 
     VarMap.fold (fun var info acc ->
       let new_var = shift_index_remove var dim_list in
-      let new_info = List.rev (List.fold_left (fun acc (v, c) -> (shift_index_remove v dim_list, c) :: acc) [] info) in
+      let new_info =(List.fold_left (fun acc (v, c) -> CoeffVector.set_nth acc (shift_index_remove v dim_list) c) (CoeffVector.of_list []) (CoeffVector.to_sparse_list info)) in
       VarMap.add new_var new_info acc) infos VarMap.empty in
     let new_intervals_remove (intervals : interval_map) dim_list : interval_map =
     VarMap.fold( fun var interval acc ->
@@ -171,41 +173,70 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
     |> List.map (fun (var, interval) -> Var.string_of var ^ " -> " ^ I.show interval)
     |> String.concat "; "
 
-  let string_of_info (e: info) =
+  (*let string_of_info (e: info) =
       match e with
       | [] -> ""
       | terms ->
         terms
         |> List.map (fun (v, c) -> Mpqf.to_string c ^ "*" ^ Var.string_of v)
-        |> String.concat " + "
+        |> String.concat " + "*)
   let string_of_infos (infos: info_map) = 
     VarMap.bindings infos
-      |> List.map (fun (var, info) -> Var.string_of var ^ " -> " ^ string_of_info info)
+      |> List.map (fun (var, info) -> Var.string_of var ^ " -> " ^ CoeffVector.show info)
       |> String.concat "; "
   
   let string_of_interval (s: I.t) (i : info)=
-    I.show s ^ "  (" ^ string_of_info i ^ ")"
+    I.show s ^ "  (" ^ CoeffVector.show i ^ ")"
 
   let string_of (t: t) =
     "{ affeq = " ^ Matrix.show t.affeq
     ^ "; intervals = [" ^ string_of_interval_map t.intervals ^ "]"
     ^ "; slacks = [" ^ string_of_infos t.infos ^ "] }"
-
+  
+  let reduce = identity (*TODO: implement reduction with simplex or base exploration.*)
   let meet (a: t) (b: t) =
     if equal a b then a else empty ()
 
   let leq (a: t) (b: t) =
     equal a b || is_empty b
 
-   (**[join a b] returns a subpolyhedra resulting from the join of two subpolyhedras a and b.
-
-   General Structure:
-   Incoming a, b:
-   check if one is bottom -> Return bottom
+  (**
+  [interval_join a b] takes two interval_maps and joins them using [RationalInterval.join].
+  QUESTION: How do we represent bottom in the interval domain?
+  *)
+  let interval_join (a : interval_map) (b : interval_map) : interval_map = 
+    VarMap.union (fun (key : Var.t) (v1 : I.t) (v2 : I.t) -> Some (I.join v1 v2)) a b
    
+    (**[join a b] returns a subpolyhedra resulting from the join of two subpolyhedras a and b.
+    QUESTION: dies dim_add and dim_remove change the canonicalization of [info]? We may need to 
+    canonicalize after each dimension change.
+    QUESTION: Do we need a join in this module or can it be realized only in the Domain file?
+ 
+    General Structure:
+    Incoming a, b:
+    We introduce infos of slack variables that are in one state but not the other into the affeq 
+    with intervals [None, None]. Then we reduce both states and do a pairwise join on affeq and 
+    intervals. 
+   
+    We need some way to have both states in the same variable space for slack variables.
+    Either, we take care of this upon insertion by keeping a global counter or another naming scheme.
+    Or, we have to create a joint state where we call a function in the join that takes care of this.
+    The "danger" lies in the case where two branches create slack variables with the same integer identifier
+    but different info and interval data. This is also propagated in the affeq, as the identifier is used in 
+    the affeq to represent a slack variable.
    *) 
   let join (a: t) (b: t) =
-    if equal a b then a else empty ()
+    let propagate_slacks (a : t) (b : t) : t =  
+      VarMap.fold (fun var info acc -> 
+        if VarMap.exists (fun _ v -> CoeffVector.equal info v) a.infos then acc
+        else acc)  (*Question here how we do this. Outlined more above.*)
+        b.infos a in
+    let new_a = reduce @@ propagate_slacks a b in
+    let new_b = reduce @@ propagate_slacks b a in
+    let new_intervals = interval_join new_a.intervals new_b.intervals in
+    let new_affeq = Matrix.linear_disjunct new_a.affeq new_b.affeq in
+    {affeq = new_affeq; intervals = new_intervals; infos = a.infos (*What are the new infos?*)}
+  
 
   let widen = join
   let narrow (a: t) (_b: t) = a
