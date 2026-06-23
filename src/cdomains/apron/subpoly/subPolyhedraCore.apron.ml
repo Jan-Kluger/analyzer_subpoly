@@ -28,6 +28,7 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
 
   (* Map keyed by variables. *)
   module VarMap = Map.Make(Var)
+  module IntMap = Map.Make (Int)
 
   type affeq = Matrix.t [@@deriving eq, ord, hash] (*Our affine equality matrix.*)
   type interval_map = I.t VarMap.t [@@deriving eq, ord] (*Map from Var to Interval*)
@@ -148,7 +149,10 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
   *)
   let dim_remove (ch: Apron.Dim.change) (t: t) =
     let shift_index_remove (old_index : Var.t) (dim_list : int list) : Var.t = 
-    (let k = List.fold_left (fun acc index -> if index < (Var.to_int old_index) then acc + 1 else acc) 0 dim_list
+      (let k = List.fold_left (fun acc index -> 
+        if index < (Var.to_int old_index) 
+        then acc + 1 
+        else acc) 0 dim_list
     in let new_index = (Var.to_int old_index) - k 
     in Var.to_t new_index) in
     let new_infos_remove (infos : info_map) dim_list : info_map = 
@@ -201,6 +205,53 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
     equal a b || is_empty b
 
   (**
+  [slack_lce a b] takes two subpolyhedra and takes care of renaming of slack variables, such that, 
+  when they refer to the same slack variable, they have the same info. Returns a pair that is [(new_a, new_b)]
+  We assume a canonical info representation.
+    {ol
+      {- Find renaming: 
+        {ul
+          {- find index where program variables end and start from there.}
+          {- create one mapping for each state, mapping from old slack index to shared slack index}
+          {- for this we find three sets: shared slacks, slacks only in a, slacks only in b.}
+          {- We first fold through a and if we find an info that is also present in b we add a mapping to both. If it only exists in a, we create a mapping for a.}
+          {- Then we fold through b to map the remaining slack variables that have info in b but not in a. We now have a mapping for a and b into the shared space.}
+        }
+      }
+      {- Remapping
+      {ul
+        {- QUESTION: We may need to do gaussian elimination of slacks that have no info. }
+        {- We need to be careful when renaming so that we do not overwrite something, maybe take inspiration from dim_add/dim_remove.}
+        {- Now we need to apply the mapping: For an info mapping present in a but not in b we:
+        {ol
+          {- add a top interval in b.intervals}
+          {- add a row in b.affeq like slack - info(slack)}
+          {- add the info into b.infos}        
+        }}}}
+    }
+  *)
+  let slack_lce (a : t) (b : t) : (t * t) = 
+    let find_key_on_info map info = Seq.find (fun (_, v) -> CoeffVector.equal v info) @@ VarMap.to_seq map in
+    let find_next_slack_idx ((map_a, map_b)) =
+      if IntMap.is_empty map_a && IntMap.is_empty map_b then fst @@ VarMap.min_binding a.intervals (*If no mapping is present we just use the first slack variable index from a.*)
+      (* Here we need to find the smallest index where nothing maps to yet. TODO: probably very inefficient as we iterate through both maps entirely.*)
+      else let update_maximum_idx _ v m = max v m in 
+      IntMap.fold update_maximum_idx map_b @@ IntMap.fold update_maximum_idx map_a 0 in
+    let process_a a b : (int IntMap.t * int IntMap.t) = 
+      VarMap.fold (fun var info ((a_map, b_map) as acc) ->
+        let new_var = find_next_slack_idx acc in
+        match find_key_on_info b.infos info with
+        | None -> (IntMap.add var new_var a_map, b_map)
+        | Some (k, v) -> (IntMap.add var new_var a_map, IntMap.add k new_var b_map)) 
+        a.infos (IntMap.empty, IntMap.empty) in
+    let process_b b current_mappings = 
+      VarMap.fold (fun var info ((a_map, b_map) as acc)-> 
+        if IntMap.mem var b_map then acc else (a_map, IntMap.add var (find_next_slack_idx acc) b_map)) b.infos current_mappings in
+    let mapping = process_b b @@ process_a a b in (*Here we have a valid mapping for a and b from slack variable indices to shared space indices.*)
+    let a_slacks = VarMap.bindings a.intervals in
+    let b_slacks = VarMap.bindings b.intervals in 
+    (a,b)
+  (**
   [interval_join a b] takes two interval_maps and joins them using [RationalInterval.join].
   QUESTION: How do we represent bottom in the interval domain?
   *)
@@ -209,7 +260,7 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
    
     (**[join a b] returns a subpolyhedra resulting from the join of two subpolyhedras a and b.
     QUESTION: dies dim_add and dim_remove change the canonicalization of [info]? We may need to 
-    canonicalize after each dimension change.
+    canonicalize after each dimension change. No!
     QUESTION: Do we need a join in this module or can it be realized only in the Domain file?
  
     General Structure:
@@ -224,8 +275,9 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
     The "danger" lies in the case where two branches create slack variables with the same integer identifier
     but different info and interval data. This is also propagated in the affeq, as the identifier is used in 
     the affeq to represent a slack variable.
-   *) 
-  let join (a: t) (b: t) =
+
+   *)
+  let join (a: t) (b: t) : t =
     let propagate_slacks (a : t) (b : t) : t =  
       VarMap.fold (fun var info acc -> 
         if VarMap.exists (fun _ v -> CoeffVector.equal info v) a.infos then acc
