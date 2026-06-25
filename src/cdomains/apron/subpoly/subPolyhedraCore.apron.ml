@@ -230,7 +230,7 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
         }}}}
     }
   *)
-  let slack_lce (a : t) (b : t) : (t * t) = 
+  let get_mapping_for_combining_slacks (a : t) (b : t) = 
     let find_key_on_info map info = Seq.find (fun (_, v) -> CoeffVector.equal v info) @@ VarMap.to_seq map in
     let find_next_slack_idx ((map_a, map_b)) =
       if IntMap.is_empty map_a && IntMap.is_empty map_b then fst @@ VarMap.min_binding a.intervals (*If no mapping is present we just use the first slack variable index from a.*)
@@ -247,10 +247,18 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
     let process_b b current_mappings = 
       VarMap.fold (fun var info ((a_map, b_map) as acc)-> 
         if IntMap.mem var b_map then acc else (a_map, IntMap.add var (find_next_slack_idx acc) b_map)) b.infos current_mappings in
-    let mapping = process_b b @@ process_a a b in (*Here we have a valid mapping for a and b from slack variable indices to shared space indices.*)
-    let a_slacks = VarMap.bindings a.intervals in
-    let b_slacks = VarMap.bindings b.intervals in 
-    (a,b)
+     process_b b @@ process_a a b  (*Here we have a valid mapping for a and b from slack variable indices to shared space indices.*)
+  
+  (**
+  [map_vector_sparse] maps a Coefficient vector based on the mapping provided. For elements in the vector 
+  not present in the mapping, the index remains the same.
+  *)
+  let map_vector_sparse (v : CoeffVector.t) (mapping : int IntMap.t) : CoeffVector.t = 
+    let helper acc (v, c) = 
+        let new_var = if IntMap.mem v mapping then IntMap.find v mapping else v in
+        CoeffVector.set_nth acc new_var c in
+      List.fold_left helper (CoeffVector.of_list []) (CoeffVector.to_sparse_list vec)
+  
   (**
   [interval_join a b] takes two interval_maps and joins them using [RationalInterval.join].
   QUESTION: How do we represent bottom in the interval domain?
