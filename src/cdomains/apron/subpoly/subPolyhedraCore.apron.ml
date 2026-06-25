@@ -257,7 +257,7 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
     let helper acc (v, c) = 
         let new_var = if IntMap.mem v mapping then IntMap.find v mapping else v in
         CoeffVector.set_nth acc new_var c in
-      List.fold_left helper (CoeffVector.of_list []) (CoeffVector.to_sparse_list vec)
+      List.fold_left helper (CoeffVector.of_list []) (CoeffVector.to_sparse_list v)
   
   (**
   [remap_slacks a mapping] remaps slack variable indices in a based on mapping.
