@@ -260,6 +260,25 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
       List.fold_left helper (CoeffVector.of_list []) (CoeffVector.to_sparse_list vec)
   
   (**
+  [remap_slacks a mapping] remaps slack variable indices in a based on mapping.
+  [a] must be a polyhedron, where the set of slack variables in infos and intervals are the same.
+  Slack variables that have a remaining interval but no info must be forgotten before this!
+  *)
+  let remap_slacks (a : t) (mapping : int IntMap.t) : t =
+    let new_infos = 
+      let helper (var : int) (info : CoeffVector.t) (acc : info VarMap.t) = 
+        let mapped_var = IntMap.find var mapping in
+        let new_info = map_vector_sparse info mapping in
+        VarMap.add mapped_var new_info acc in
+      VarMap.fold helper VarMap.empty a.infos in
+    let new_intervals =
+      VarMap.fold (fun var intv acc -> VarMap.add (IntMap.find var mapping) intv acc) VarMap.empty a.intervals in
+    let new_affeq  = a.affeq (*TODO: mapping for affeq!*)
+    in
+    {affeq = new_affeq; intervals = new_intervals; infos = new_infos}
+
+
+  (**
   [interval_join a b] takes two interval_maps and joins them using [RationalInterval.join].
   QUESTION: How do we represent bottom in the interval domain?
   *)
