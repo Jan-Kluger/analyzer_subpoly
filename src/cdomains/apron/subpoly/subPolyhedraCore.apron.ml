@@ -116,6 +116,17 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
     forget_vars [var] t
   
   (**
+  [map_vector_sparse] maps a Coefficient vector based on the mapping provided. For elements in the vector 
+  not present in the mapping, the index remains the same.
+  *)
+  let remap_vector_sparse (v : CoeffVector.t) (mapping : int IntMap.t) : CoeffVector.t = 
+    let helper acc (v, c) = 
+        let new_var = if IntMap.mem v mapping then IntMap.find v mapping else v in
+        CoeffVector.set_nth acc new_var c in
+      List.fold_left helper (CoeffVector.of_list []) (CoeffVector.to_sparse_list v)
+  
+
+  (**
   [dim_add] Apron dimension change
   *)
   let dim_add (ch: Apron.Dim.change) (t: t) = 
@@ -127,9 +138,7 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
     let new_infos_add (infos : info_map) occ_cols : info_map = 
     VarMap.fold(fun var info acc ->
       let new_var = shift_index_add var occ_cols in
-      let (info_list : (Var.t * Mpqf.t) list) = CoeffVector.to_sparse_list info in
-      let set_infos acc (v, c) = CoeffVector.set_nth acc (shift_index_add v occ_cols) c in
-      let new_info = List.fold_left set_infos (CoeffVector.of_list []) info_list in
+      let new_info = remap_vector_sparse info (IntMap.of_list occ_cols) in
       VarMap.add new_var new_info acc) infos VarMap.empty in
     let new_intervals_add (intervals : interval_map) occ_cols : interval_map = 
     VarMap.fold( fun var interval acc ->
@@ -230,7 +239,8 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
         }}}}
     }
   *)
-  let get_mapping_for_combining_slacks (a : t) (b : t) = 
+  let slack_lce a b = 
+    let get_mapping (a : t) (b : t) = 
     let find_key_on_info map info = Seq.find (fun (_, v) -> CoeffVector.equal v info) @@ VarMap.to_seq map in
     let find_next_slack_idx ((map_a, map_b)) =
       if IntMap.is_empty map_a && IntMap.is_empty map_b then fst @@ VarMap.min_binding a.intervals (*If no mapping is present we just use the first slack variable index from a.*)
@@ -248,44 +258,36 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
       VarMap.fold (fun var info ((a_map, b_map) as acc)-> 
         if IntMap.mem var b_map then acc else (a_map, IntMap.add var (find_next_slack_idx acc) b_map)) b.infos current_mappings in
      process_b b @@ process_a a b  (*Here we have a valid mapping for a and b from slack variable indices to shared space indices.*)
-  
-  (**
-  [map_vector_sparse] maps a Coefficient vector based on the mapping provided. For elements in the vector 
-  not present in the mapping, the index remains the same.
-  *)
-  let map_vector_sparse (v : CoeffVector.t) (mapping : int IntMap.t) : CoeffVector.t = 
-    let helper acc (v, c) = 
-        let new_var = if IntMap.mem v mapping then IntMap.find v mapping else v in
-        CoeffVector.set_nth acc new_var c in
-      List.fold_left helper (CoeffVector.of_list []) (CoeffVector.to_sparse_list v)
-  
-  (**
-  [remap_slacks a mapping] remaps slack variable indices in a based on mapping.
-  [a] must be a polyhedron, where the set of slack variables in infos and intervals are the same.
-  Slack variables that have a remaining interval but no info must be forgotten before this!
-  *)
-  let remap_slacks (a : t) (mapping : int IntMap.t) : t =
+    in
+    let remap_slacks (a : t) (mapping : int IntMap.t) : t =
     let new_infos = 
       let helper (var : int) (info : CoeffVector.t) (acc : info VarMap.t) = 
         let mapped_var = IntMap.find var mapping in
-        let new_info = map_vector_sparse info mapping in
+        let new_info = remap_vector_sparse info mapping in
         VarMap.add mapped_var new_info acc in
       VarMap.fold helper VarMap.empty a.infos in
     let new_intervals =
       VarMap.fold (fun var intv acc -> VarMap.add (IntMap.find var mapping) intv acc) VarMap.empty a.intervals in
-    let new_affeq  = Matrix.map (fun row -> map_vector_sparse row mapping) a.affeq in 
-    {affeq = new_affeq; intervals = new_intervals; infos = new_infos}
-
-    
-  let slack_lce a b = 
+    let new_affeq  = Matrix.map (fun row -> remap_vector_sparse row mapping) a.affeq in 
+    {affeq = new_affeq; intervals = new_intervals; infos = new_infos} in
     (*Remove slacks that have no info because they cannot be kept in the join:*)
     let a_with_slacks_removed = VarMap.fold (fun var _ acc -> if not @@ VarMap.mem var a.infos then forget_var var acc else acc) a.intervals a in 
     let b_with_slacks_removed = VarMap.fold (fun var _ acc -> if not @@ VarMap.mem var b.infos then forget_var var acc else acc) b.intervals b in 
-    let (a_mapping, b_mapping) = get_mapping_for_combining_slacks a_with_slacks_removed b_with_slacks_removed in
+    let (a_mapping, b_mapping) = get_mapping a_with_slacks_removed b_with_slacks_removed in
     let a_remapped = remap_slacks a_with_slacks_removed a_mapping in
     let b_remapped = remap_slacks b_with_slacks_removed b_mapping in
     (a_remapped, b_remapped)
     
+    let inject_slack_for_join (a, b) = 
+      let inject_slack var info x = 
+        let new_intervals = VarMap.add var I.top x.intervals in
+        let new_infos = VarMap.add var info x.infos in
+        let new_affeq = Matrix.append_row x.affeq (CoeffVector.set_nth info var (Mpqf.of_int (-1))) in
+        {affeq = new_affeq; infos = new_infos; intervals = new_intervals} in
+      let new_a = VarMap.fold (fun var info acc -> if VarMap.mem var a.infos then acc else inject_slack var info acc ) b.infos a in
+      let new_b = VarMap.fold (fun var info acc -> if VarMap.mem var b.infos then acc else inject_slack var info acc) a.infos b in
+      (new_a, new_b)
+
   (**
   [interval_join a b] takes two interval_maps and joins them using [RationalInterval.join].
   QUESTION: How do we represent bottom in the interval domain?
@@ -294,26 +296,12 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
     VarMap.union (fun (key : Var.t) (v1 : I.t) (v2 : I.t) -> Some (I.join v1 v2)) a b
    
     (**[join a b] returns a subpolyhedra resulting from the join of two subpolyhedras a and b.
-    QUESTION: dies dim_add and dim_remove change the canonicalization of [info]? We may need to 
-    canonicalize after each dimension change. No!
-    QUESTION: Do we need a join in this module or can it be realized only in the Domain file?
- 
-    General Structure:
-    Incoming a, b:
-    We introduce infos of slack variables that are in one state but not the other into the affeq 
-    with intervals [None, None]. Then we reduce both states and do a pairwise join on affeq and 
-    intervals. 
-   
-    We need some way to have both states in the same variable space for slack variables.
-    Either, we take care of this upon insertion by keeping a global counter or another naming scheme.
-    Or, we have to create a joint state where we call a function in the join that takes care of this.
-    The "danger" lies in the case where two branches create slack variables with the same integer identifier
-    but different info and interval data. This is also propagated in the affeq, as the identifier is used in 
-    the affeq to represent a slack variable.
-
-   *)
+      We assume that the info fields of slack variables are canonical. 
+      Slack variables with an interval bound but no info field are discarded, as they cannot be matched
+      with slack variables from the other state.
+    *)
   let join (a: t) (b: t) : t =
-    let (remapped_a, remapped_b) = slack_lce a b in
+    let (remapped_a, remapped_b) = inject_slack_for_join @@ slack_lce a b in
     let new_a = reduce remapped_a in
     let new_b = reduce remapped_b in
     let new_intervals = interval_join new_a.intervals new_b.intervals in
