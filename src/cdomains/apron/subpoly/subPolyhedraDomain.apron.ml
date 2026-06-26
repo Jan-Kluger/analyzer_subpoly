@@ -351,24 +351,41 @@ struct
     if vars = [] || is_bot t || is_top t then t
     else 
       let d = Option.get t.d in 
-      let dims = List.map (Environment.dim_of_var t.env) vars in (*map of vars in Env. to dimensions in matrix.*)
+      let dims = List.map (Environment.dim_of_var t.env) vars in (* map of vars in Env. to dimensions in matrix.*)
       {t with d = Some (SubPolyDomain.forget_vars dims d)}
   
   let forget_var (t: t) (v: V.t) = forget_vars t [v]
   
 
-  let substitute_expr (t: t) (v: V.t) (terms: (Z.t * int) list) (c: Z.t) = failwith "SubPolyhedraDomain.substitute_expr: not implemented"
-  let add_equation (t: t) (terms: (Z.t * int) list) (c: Z.t) = failwith "SubPolyhedraDomain.add_equation: not implemented"
+  let add_equation (t: t) (v: int) (terms: (Z.t * int) list) (c: Z.t) =
+    match t.d with
+    | None -> t
+    | Some d ->
+      let const_idx = Environment.size t.env in
+      let row_entries =
+        (v, Mpqf.neg Mpqf.one) :: 
+        (const_idx, mpqf_of_z c) :: (* constant in letzte Spalte *)
+        List.map (fun (coeff, idx) -> (idx, mpqf_of_z coeff)) terms
+      in
+      let row = SubPolyDomain.CoeffVector.of_sparse_list (const_idx + 1) row_entries in
+      { t with d = Some (SubPolyDomain.add_affeq_row row d) } 
+      (* TODO: is the row in the correct form? *)
+           
 
-  
+  let substitute_expr (t: t) (v: int) (terms: (Z.t * int) list) (c: Z.t) = 
+    match t.d with
+    | None -> t
+    | Some d -> failwith "TODO: substitute_expr"
+
+
   let assign_texpr (t: VarManagement.t) var texp =
     match t.d with
     | None -> t
     | Some d ->
       let var_i = Environment.dim_of_var t.env var (* this is the variable we are assigning to *) in
       begin match VarManagement.simplified_monomials_from_texp t texp with
-        | Some (terms, c) when List.exists (fun (_, var) -> var = var_i) terms -> substitute_expr t var terms c
-        | Some (terms, c) -> add_equation t terms c
+        | Some (terms, c) when List.exists (fun (_, var) -> var = var_i) terms -> substitute_expr t var_i terms c
+        | Some (terms, c) -> add_equation (forget_var t var) var_i terms c
         | _ -> forget_vars t [var] (* all other cases: var := texp, where texp is not of any form we can handle, so we forget var *)
       end
   
