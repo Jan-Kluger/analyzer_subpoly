@@ -25,7 +25,7 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
     AffineEqualityDomain.AffineEqualityMatrix
       (Vector)
       (ListMatrix.ListMatrix) (*Question: do we actually use this, if we just use the Matrix and Vector implementations? *)
-
+        (*QUESTION: Why don't we use the affineEqualityDenseDomain?*)
   (* Map keyed by variables. *)
   module VarMap = Map.Make(Var)
   module IntMap = Map.Make (Int)
@@ -273,11 +273,19 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
       VarMap.fold helper VarMap.empty a.infos in
     let new_intervals =
       VarMap.fold (fun var intv acc -> VarMap.add (IntMap.find var mapping) intv acc) VarMap.empty a.intervals in
-    let new_affeq  = a.affeq (*TODO: mapping for affeq!*)
-    in
+    let new_affeq  = Matrix.map (fun row -> map_vector_sparse row mapping) a.affeq in 
     {affeq = new_affeq; intervals = new_intervals; infos = new_infos}
 
-
+    
+  let slack_lce a b = 
+    (*Remove slacks that have no info because they cannot be kept in the join:*)
+    let a_with_slacks_removed = VarMap.fold (fun var _ acc -> if not @@ VarMap.mem var a.infos then forget_var var acc else acc) a.intervals a in 
+    let b_with_slacks_removed = VarMap.fold (fun var _ acc -> if not @@ VarMap.mem var b.infos then forget_var var acc else acc) b.intervals b in 
+    let (a_mapping, b_mapping) = get_mapping_for_combining_slacks a_with_slacks_removed b_with_slacks_removed in
+    let a_remapped = remap_slacks a_with_slacks_removed a_mapping in
+    let b_remapped = remap_slacks b_with_slacks_removed b_mapping in
+    (a_remapped, b_remapped)
+    
   (**
   [interval_join a b] takes two interval_maps and joins them using [RationalInterval.join].
   QUESTION: How do we represent bottom in the interval domain?
@@ -305,13 +313,9 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
 
    *)
   let join (a: t) (b: t) : t =
-    let propagate_slacks (a : t) (b : t) : t =  
-      VarMap.fold (fun var info acc -> 
-        if VarMap.exists (fun _ v -> CoeffVector.equal info v) a.infos then acc
-        else acc)  (*Question here how we do this. Outlined more above.*)
-        b.infos a in
-    let new_a = reduce @@ propagate_slacks a b in
-    let new_b = reduce @@ propagate_slacks b a in
+    let (remapped_a, remapped_b) = slack_lce a b in
+    let new_a = reduce remapped_a in
+    let new_b = reduce remapped_b in
     let new_intervals = interval_join new_a.intervals new_b.intervals in
     let new_affeq = Matrix.linear_disjunct new_a.affeq new_b.affeq in
     {affeq = new_affeq; intervals = new_intervals; infos = a.infos (*What are the new infos?*)}
