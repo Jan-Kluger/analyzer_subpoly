@@ -387,7 +387,7 @@ struct
         ) 
         [] terms_and_constant 
       in
-      let new_affeq = Matrix.fold_left
+      let new_affeq = SubPolyDomain.Matrix.fold_left
         (fun acc row ->
           match List.find_opt (fun (_, idx) -> idx = mpqf_of_z (Z.of_int v)) row with
           | None -> 
@@ -407,7 +407,7 @@ struct
             let new_row_vector = SubPolyDomain.CoeffVector.of_sparse_list (const_idx + 1) new_row in
             SubPolyDomain.add_affeq_row new_row_vector acc
         )
-        (Matrix.empty ()) d.affeq
+        ((SubPolyDomain.empty ()).affeq) d.affeq
       in
       let new_t_d = {d with affeq = new_affeq} in
       {t with d = Some new_t_d }
