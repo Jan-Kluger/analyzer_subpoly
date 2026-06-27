@@ -363,19 +363,54 @@ struct
     | Some d ->
       let const_idx = Environment.size t.env in
       let row_entries =
-        (v, Mpqf.neg Mpqf.one) :: 
-        (const_idx, mpqf_of_z c) :: (* constant in letzte Spalte *)
-        List.map (fun (coeff, idx) -> (idx, mpqf_of_z coeff)) terms
+        (-1, mpqf_of_z (Z.of_int v)) :: 
+        (Z.to_int c, mpqf_of_z (Z.of_int const_idx)) :: (* constant in letzte Spalte *)
+        List.map (fun (coeff, idx) -> (Z.to_int coeff, mpqf_of_z (Z.of_int idx))) terms
       in
       let row = SubPolyDomain.CoeffVector.of_sparse_list (const_idx + 1) row_entries in
       { t with d = Some (SubPolyDomain.add_affeq_row row d) } 
-      (* TODO: is the row in the correct form? *)
            
 
   let substitute_expr (t: t) (v: int) (terms: (Z.t * int) list) (c: Z.t) = 
     match t.d with
     | None -> t
-    | Some d -> failwith "TODO: substitute_expr"
+    | Some d -> 
+      let const_idx = Environment.size t.env in
+      let terms_and_constant = 
+        (Z.to_int c, mpqf_of_z (Z.of_int const_idx)) :: 
+        List.map (fun (coeff, idx) -> (Z.to_int coeff, mpqf_of_z (Z.of_int idx))) terms in 
+      let v_coeff = match List.find_opt (fun (_, idx) -> idx = mpqf_of_z (Z.of_int v)) terms_and_constant with | Some (coeff,_) -> coeff | None -> failwith "Variable not found in terms_and_constant" in
+      let substitute_x_by_this = List.fold_left 
+        (fun acc (coeff, idx) -> 
+          if idx = mpqf_of_z (Z.of_int v) then (1/v_coeff, idx)::acc 
+          else (((-1/v_coeff)*coeff), idx) :: acc
+        ) 
+        [] terms_and_constant 
+      in
+      let new_affeq = Matrix.fold_left
+        (fun acc row ->
+          match List.find_opt (fun (_, idx) -> idx = mpqf_of_z (Z.of_int v)) row with
+          | None -> 
+             let row_vector = SubPolyDomain.CoeffVector.of_sparse_list (const_idx + 1) row in
+             SubPolyDomain.add_affeq_row row_vector acc   
+          | Some (coeff, idx) -> 
+            let new_row_with_duplicates = List.fold_left (fun acc (c, i) -> (c*coeff, i)::acc) row substitute_x_by_this in
+            let new_row = List.fold_left
+              (fun acc (c, i) ->
+                if List.exists (fun (_, idx) -> idx = i) acc then
+                  let (existing_coeff, _) = List.find (fun (_, idx) -> idx = i) acc in
+                  let updated_coeff = existing_coeff + c in
+                  List.map (fun (ec, idx) -> if idx = i then (updated_coeff, idx) else (ec, idx)) acc
+                else (c, i) :: acc
+              ) [] new_row_with_duplicates 
+            in
+            let new_row_vector = SubPolyDomain.CoeffVector.of_sparse_list (const_idx + 1) new_row in
+            SubPolyDomain.add_affeq_row new_row_vector acc
+        )
+        Matrix.empty d.affeq
+      in
+      let new_t_d = {d with affeq = new_affeq} in
+      {t with d = Some new_t_d }
 
 
   let assign_texpr (t: VarManagement.t) var texp =

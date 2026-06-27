@@ -41,15 +41,12 @@ input: subpolyhedra t, and terms, c from simplified_monomials_from_texpr, and va
 input: subpolyhedra t, and terms, c from simplified_monomials_from_texpr, and var (the variable which is shifted)
 
 IDEA: for the expression: x = a*x + terms + c (NOTE: here terms is already terms without a\*x)
-      substitute x by 1/a * x - (1/a) * (terms) - (1/a) * c in every affeq row which constains x
-
-QUESTION: how do we do that with the constant? can we just add it in the last row and then ignore the interval?
+      substitute x by 1/a * x + (-1/a) * (terms + c) in every affeq row which constains x
 
 EXAMPLE:
     row: 1/2*x + 7y - slack = 0 with slack interavl [0,7]
     expr: x = 5x -3y + 5/3z + 1/3a + 11
     1. compute, what we have to substitute x by: substitute x by 1/5*x - 1/5* (-3y + 5/3z + 1/3a + 11) = 1/5*x +3/5y - 1/3z - 1/15a -11/5
-        QUESTION: do we have a function to do this step?
     2. insert that into the row: 1/2*(1/5*x +3/5y - 1/3z - 1/15a -11/5) + 7y - slack = 0 with slack interavl [0,7]
         -> 1/10x +3/10y -1/6z -1/30a -11/10 +7y - slack = 1/10x +73/10y -1/6z -1/30a -11/10 - slack 
 
@@ -58,11 +55,9 @@ STRATEGY:
 2. fold over affeq. for every row do:
     - if var is not contained in the row: just add it to a new affeq
     - else (var is contained in the row): do the substitution
-        1) 
-        2) 
+        1) multiply everything of substitute_x_by_this by the coeff of x, add the result to the roe and remove (coeff, x) from it 
+        2) then fold over the row and att the coefficients of the same variables.
 
-QUESTION: do we have to have the row in a specific form, like 2x - y instead of 4x -2y? of yes, is there a function for this?
-    and if there is a function, does is also handle the intervals?
 
 
 
