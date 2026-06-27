@@ -407,7 +407,7 @@ struct
             let new_row_vector = SubPolyDomain.CoeffVector.of_sparse_list (const_idx + 1) new_row in
             SubPolyDomain.add_affeq_row new_row_vector acc
         )
-        Matrix.empty d.affeq
+        (Matrix.empty ()) d.affeq
       in
       let new_t_d = {d with affeq = new_affeq} in
       {t with d = Some new_t_d }
