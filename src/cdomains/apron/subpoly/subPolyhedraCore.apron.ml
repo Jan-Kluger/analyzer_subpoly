@@ -31,8 +31,8 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
 
   type affeq = Matrix.t [@@deriving eq, ord, hash] (*Our affine equality matrix.*)
   type interval_map = I.t VarMap.t [@@deriving eq, ord] (*Map from Var to Interval*)
-  type info = (Var.t * Mpqf.t) list [@@deriving eq, ord, hash] (*similar to sparse vector, might acutally use sparse vector here? QUESTION*)
-  type info_map = info VarMap.t [@@deriving eq, ord] (*Map from Var to info (maybe sparse vector)*)
+  type info = CoeffVector.t [@@deriving eq, ord, hash] (*Coefficient vector over the matrix columns (constant in the last position)*)
+  type info_map = info VarMap.t [@@deriving eq, ord] (*Map from Var to info*)
 
   let hash_interval_map (m: interval_map) =
     VarMap.fold (fun var interval acc ->
@@ -73,6 +73,21 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
   let mem_intv (var: Var.t) (t: t) =
     VarMap.mem var t.intervals
 
+  
+  (** Number of slack columns = size of the trailing slack block. Every slack has an
+      interval *)
+  let num_slacks (t: t) = VarMap.cardinal t.intervals
+
+  let insert_slack (slack_col: int) (expr: info) (interval: I.t) (t: t) : t =
+    let widen v = CoeffVector.insert_zero_at_indices v [(slack_col, 1)] 1 in
+    let affeq = Matrix.add_empty_columns t.affeq [| slack_col |] in
+    let expr  = widen expr in                                          (* slack col now 0, const shifted right *)
+    let row   = CoeffVector.set_nth expr slack_col (Mpqf.neg Mpqf.one) in (* expr - slack = 0 *)
+    let key   = Var.to_t slack_col in
+    { affeq     = Matrix.append_row affeq row;
+      infos     = VarMap.add key expr (VarMap.map widen t.infos);
+      intervals = VarMap.add key interval t.intervals }
+
   let add_affeq_row (row: CoeffVector.t) (t: t) =
     { t with affeq = Matrix.append_row t.affeq row }
   
@@ -93,7 +108,7 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
     Used in forget_vars.
   *) 
   let rem_infos_containing_var (slacks : info_map) (var : Var.t) : info_map = 
-     VarMap.filter (fun _ (info : info) -> not (List.mem var (List.map fst info))) slacks 
+     VarMap.filter (fun _ (info : info) -> CoeffVector.nth info (Var.to_int var) =: Mpqf.zero) slacks 
 
   (**
     [forget_vars vars t] forgets a list of variables in the polyhedron.
@@ -200,11 +215,11 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
     |> String.concat "; "
 
   let string_of_info (e: info) =
-      match e with
+      match CoeffVector.to_sparse_list e with
       | [] -> ""
       | terms ->
         terms
-        |> List.map (fun (v, c) -> Mpqf.to_string c ^ "*" ^ Var.string_of v)
+        |> List.map (fun (i, c) -> Mpqf.to_string c ^ "*" ^ Var.string_of (Var.to_t i))
         |> String.concat " + "
   let string_of_infos (infos: info_map) = 
     VarMap.bindings infos
