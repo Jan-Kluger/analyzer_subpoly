@@ -255,9 +255,9 @@ same indices. Then it calls SubPolyDomain.join on the updated subpolyhedra. Adap
 
 
   let leq _a _b = failwith "SubPolyhedraDomain.leq: not implemented"
-  let widen _a _b = failwith "SubPolyhedraDomain.widen: not implemented"
-  let narrow _a _b = failwith "SubPolyhedraDomain.narrow: not implemented"
-  let unify _a _b = failwith "SubPolyhedraDomain.unify: not implemented"
+  let widen _a _b = failwith "SubPolyhedraDomain.widen: not implemented" (* join *)
+  let narrow _a _b = failwith "SubPolyhedraDomain.narrow: not implemented" (* meet *)
+  let unify _a _b = failwith "SubPolyhedraDomain.unify: not implemented" (* meet *)
 
   (* transfer functions *)
 
