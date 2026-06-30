@@ -281,39 +281,107 @@ same indices. Then it calls SubPolyDomain.join on the updated subpolyhedra. Adap
       { t with d = Some (SubPolyDomain.add_affeq_row row d) } 
            
 
+  let substitute_expr (t: t) (v: int) (coeffvector: CoeffVector.t) =
+  match t.d with
+  | None -> t
+  | Some d ->
+    let terms_and_constant = CoeffVector.to_sparse_list coeffvector in
+    let v_coeff =
+      match List.find_opt (fun (idx, _) -> idx = v) terms_and_constant with
+      | Some (_, coeff) -> coeff
+      | None -> failwith "Variable not found in terms_and_constant"
+    in
+    let substitute_x_by_this =
+      List.fold_left
+        (fun acc (idx, coeff) ->
+          if idx = v then
+            (idx, Mpqf.one /: v_coeff) :: acc
+          else
+            (idx, Mpqf.neg (coeff /: v_coeff)) :: acc
+        )
+        []
+        terms_and_constant in
+    let add_or_update_coeff acc idx coeff =
+      if coeff =: Mpqf.zero then acc
+      else
+        match List.assoc_opt idx acc with
+        | None ->
+          (idx, coeff) :: acc
+        | Some old_coeff ->
+          let new_coeff = old_coeff +: coeff in
+          let acc_without_idx = List.remove_assoc idx acc in
+          if new_coeff =: Mpqf.zero then
+            acc_without_idx
+          else
+            (idx, new_coeff) :: acc_without_idx in
+    let combine_sparse_list sparse =
+      List.fold_left (fun acc (idx, coeff) -> add_or_update_coeff acc idx coeff) [] sparse
+    in
+    let new_t =
+      SubPolyDomain.Matrix.fold_left
+        (fun acc row ->
+          let row_sparse = CoeffVector.to_sparse_list row in
+          match List.find_opt (fun (idx, _) -> idx = v) row_sparse with
+          | None ->
+            let row_vector =
+              SubPolyDomain.CoeffVector.of_sparse_list
+                (CoeffVector.length row)
+                row_sparse
+            in
+            SubPolyDomain.add_affeq_row row_vector acc
+          | Some (_, row_v_coeff) ->
+            let row_without_v = List.filter (fun (idx, _) -> idx <> v) row_sparse in
+            let substituted_terms =  List.map (fun (idx, coeff) -> (idx, row_v_coeff *: coeff)) substitute_x_by_this in
+            let new_row_sparse =
+              combine_sparse_list (row_without_v @ substituted_terms)
+            in
+            let new_row_vector =
+              SubPolyDomain.CoeffVector.of_sparse_list
+                (CoeffVector.length row)
+                new_row_sparse
+            in
+            SubPolyDomain.add_affeq_row new_row_vector acc
+        )
+        (SubPolyDomain.empty ())
+        d.affeq
+    in
+    { t with d = Some new_t }
+
+
+
   let substitute_expr (t: t) (v: int) (coeffvector: CoeffVector.t) = 
     match t.d with
     | None -> t
     | Some d -> 
-      let const_idx = Environment.size t.env in
       let terms_and_constant = CoeffVector.to_sparse_list coeffvector in
-      let v_coeff = match List.find_opt (fun (_, idx) -> idx = mpqf_of_z (Z.of_int v)) terms_and_constant with | Some (coeff,_) -> coeff | None -> failwith "Variable not found in terms_and_constant" in
+      let v_coeff = match List.find_opt (fun (idx, _) -> idx = v) terms_and_constant with | Some (_, coeff) -> coeff | None -> failwith "Variable not found in terms_and_constant" in
       let substitute_x_by_this = List.fold_left 
-        (fun acc (coeff, idx) -> 
-          if idx = mpqf_of_z (Z.of_int v) then (1/v_coeff, idx)::acc 
-          else (((-1/v_coeff)*coeff), idx) :: acc
+        (fun acc (idx, coeff) -> 
+          if idx = v then (idx, Mpqf.one /: v_coeff) :: acc
+          else (idx, Mpqf.neg (coeff /: v_coeff)) :: acc
         ) 
         [] terms_and_constant 
       in
       let new_t = SubPolyDomain.Matrix.fold_left
         (fun acc row ->
-          let row = CoeffVector.to_sparse_list row in
-          match List.find_opt (fun (_, idx) -> idx = mpqf_of_z (Z.of_int v)) row with
-          | None -> 
-             let row_vector = SubPolyDomain.CoeffVector.of_sparse_list (const_idx + 1) row in
-             SubPolyDomain.add_affeq_row row_vector acc   
-          | Some (coeff, idx) -> 
-            let new_row_with_duplicates = List.fold_left (fun acc (c, i) -> (c*coeff, i)::acc) row substitute_x_by_this in
-            let new_row = List.fold_left
-              (fun acc (c, i) ->
-                if List.exists (fun (_, idx) -> idx = i) acc then
-                  let (existing_coeff, _) = List.find (fun (_, idx) -> idx = i) acc in
-                  let updated_coeff = existing_coeff + c in
-                  List.map (fun (ec, idx) -> if idx = i then (updated_coeff, idx) else (ec, idx)) acc
-                else (c, i) :: acc
+          let row_sparse_list = CoeffVector.to_sparse_list row in
+          match List.find_opt (fun (idx, _) -> idx = v) row_sparse_list with
+          | None -> (* this row does not contain v --> just add this to the new matrix *)
+            let row_vector = SubPolyDomain.CoeffVector.of_sparse_list (CoeffVector.length row) row_sparse_list in
+            SubPolyDomain.add_affeq_row row_vector acc   
+          | Some (idx, coeff) ->  (* this row contains v -> change this row *)
+            let row_without_v = List.filter (fun (idx, _) -> idx <> v) row_sparse_list in
+            let new_row_with_duplicates = List.fold_left (fun acc (i, c) -> (i, coeff *: c)::acc) row_without_v substitute_x_by_this in
+            let new_row = List.fold_left 
+              (fun acc (i, c) ->
+                if List.exists (fun (idx, _) -> idx = i) acc then
+                  let (_, existing_coeff) = List.find (fun (idx, _) -> idx = i) acc in
+                  let updated_coeff = existing_coeff +: c in
+                  List.map (fun (idx, ec) -> if idx = i then (idx, updated_coeff) else (idx, ec)) acc
+                else (i, c) :: acc
               ) [] new_row_with_duplicates 
             in
-            let new_row_vector = SubPolyDomain.CoeffVector.of_sparse_list (const_idx + 1) new_row in
+            let new_row_vector = SubPolyDomain.CoeffVector.of_sparse_list (CoeffVector.length row) new_row in
             SubPolyDomain.add_affeq_row new_row_vector acc
         )
         ((SubPolyDomain.empty ())) d.affeq
