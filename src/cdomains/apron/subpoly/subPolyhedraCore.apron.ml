@@ -1,5 +1,6 @@
 module Mpqf = SharedFunctions.Mpqf
 open Intervalsig
+open OcplibSimplex
 
 include Batteries
 
