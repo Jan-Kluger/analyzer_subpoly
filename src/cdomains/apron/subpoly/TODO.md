@@ -1,5 +1,7 @@
 ## SubPolyhedra Domain TODO
 
+- [ ] **Intervals** refactor to use Option
+- [ ] **Implement:** Environment.lce for slack variables
 
 ### Lattice Operations
 - [ ] **Join** : TODO next!

@@ -11,6 +11,10 @@ let timing_wrap = Vector.timing_wrap
 module type SparseMatrix =
 sig
   include Matrix
+
+  val map : (vec -> vec) -> t -> t
+
+  val fold_left :('acc -> vec -> 'acc) -> 'acc -> t -> 'acc
   val get_col_upper_triangular: t -> int -> vec
 
   val swap_rows: t -> int -> int -> t
@@ -60,6 +64,9 @@ module ListMatrix: SparseMatrixFunctor =
 
     let compare_num_rows = List.compare_lengths
 
+
+    let map f m  = List.map f m
+    let fold_left f acc m = List.fold_left f acc m
     let num_cols m =
       if m = [] then 0 else V.length (List.hd m)
 

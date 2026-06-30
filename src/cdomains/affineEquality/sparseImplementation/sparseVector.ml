@@ -16,6 +16,10 @@ sig
 
   val insert_zero_at_indices: t -> (int * int) list -> int -> t
 
+  val map: (int * num -> int * num) -> t -> t
+
+  val fold_left: ('acc -> int * num -> 'acc) -> 'acc -> t -> 'acc
+
   val remove_at_indices: t -> int list -> t
 
   (* Returns the part of the vector starting from index n*)
@@ -54,6 +58,10 @@ module SparseVector: SparseVectorFunctor =
     }[@@deriving eq, ord, hash]
 
     let copy v = v
+
+    let map (f : (int * A.t) -> (int * A.t)) (v : t)  : t = {v with entries = List.map f v.entries}
+
+    let fold_left f acc v = List.fold_left f acc v.entries
 
     (** [of_list l] returns a vector constructed from the non-sparse list [l] *)
     let of_list l =
