@@ -342,7 +342,7 @@ same indices. Then it calls SubPolyDomain.join on the updated subpolyhedra. Adap
   (*< Copy-pasted from ltve >*)
   let assign_var (t: VarManagement.t) v v' =
     let t = add_vars t [v; v'] in
-    assign_texpr t v (Var v') (* TODO Leonie: Find mistake *)
+    assign_texpr t v (Var v') 
   (*</ Copy-pasted from ltve >*)
 
   (*< Copy-pasted from ltve >*)
