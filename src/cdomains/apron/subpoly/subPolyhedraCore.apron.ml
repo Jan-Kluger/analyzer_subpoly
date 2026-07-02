@@ -79,6 +79,17 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
       interval *)
   let num_slacks (t: t) = VarMap.cardinal t.intervals
 
+  (**[insert_w_resize vec idx value] is a workaround to dynamically grow a CoeffVector without changing the module itself.
+     This could be in the module if approved my Michael.*)
+  let set_nth_w_resize vec idx value = 
+    let len = CoeffVector.length vec in
+    let wide = if idx >= len
+      then 
+        let zeroes = (idx - len) + 1 in
+        CoeffVector.insert_zero_at_indices vec [(len, zeroes)] zeroes 
+      else vec in
+    CoeffVector.set_nth wide idx value
+
   let insert_slack (slack_col: int) (expr: info) (interval: I.t) (t: t) : t =
     let widen v = CoeffVector.insert_zero_at_indices v [(slack_col, 1)] 1 in
     let affeq = Matrix.add_empty_columns t.affeq [| slack_col |] in
@@ -145,7 +156,7 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
       VarMap.fold(fun var info acc ->
           let new_var = shift_index_add var occ_cols in
           let new_info = List.fold_left 
-              (fun acc (v,c) -> CoeffVector.set_nth acc (shift_index_add v occ_cols) c) 
+              (fun acc (v,c) -> set_nth_w_resize acc (shift_index_add v occ_cols) c) 
               (CoeffVector.of_list []) (CoeffVector.to_sparse_list info) in
           VarMap.add new_var new_info acc) infos VarMap.empty in
     let new_intervals_add (intervals : interval_map) occ_cols : interval_map = 
@@ -178,7 +189,7 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
     let new_infos_remove (infos : info_map) dim_list : info_map = 
     VarMap.fold (fun var info acc ->
       let new_var = shift_index_remove var dim_list in
-      let new_info =(List.fold_left (fun acc (v, c) -> CoeffVector.set_nth acc (shift_index_remove v dim_list) c) (CoeffVector.of_list []) (CoeffVector.to_sparse_list info)) in
+      let new_info =(List.fold_left (fun acc (v, c) -> set_nth_w_resize acc (shift_index_remove v dim_list) c) (CoeffVector.of_list []) (CoeffVector.to_sparse_list info)) in
       VarMap.add new_var new_info acc) infos VarMap.empty in
     let new_intervals_remove (intervals : interval_map) dim_list : interval_map =
       VarMap.fold( fun var interval acc ->
@@ -257,9 +268,9 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
       let const = CoeffVector.nth vec ((CoeffVector.length vec) - 1) in
       let helper acc (v, c) = 
         let new_var = if IntMap.mem v mapping then IntMap.find v mapping else v in
-        CoeffVector.set_nth acc new_var c in
+        set_nth_w_resize acc new_var c in
       let res = List.fold_left helper (CoeffVector.of_list []) (CoeffVector.to_sparse_list vec) in
-      if const = Mpqf.zero then res else CoeffVector.set_nth res (CoeffVector.length res) const 
+      if const = Mpqf.zero then res else set_nth_w_resize res (CoeffVector.length res) const 
     in
     (*[remap_slacks a mapping const_idx] remaps the slack variables of a subpolyhedra a using the mapping from [get_mapping a b]. *)
     let remap_slacks (a : t) (mapping : int IntMap.t) : t =
@@ -295,7 +306,7 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
     let inject_slack var info x = 
       let new_intervals = VarMap.add var I.top x.intervals in
       let new_infos = VarMap.add var info x.infos in
-      let new_affeq = Matrix.append_row x.affeq (CoeffVector.set_nth info var (Mpqf.of_int (-1))) in
+      let new_affeq = Matrix.append_row x.affeq (set_nth_w_resize info var (Mpqf.of_int (-1))) in
       {affeq = new_affeq; infos = new_infos; intervals = new_intervals} in
     let new_a = VarMap.fold (fun var info acc -> if VarMap.mem var a.infos then acc else inject_slack var info acc ) b.infos a in
     let new_b = VarMap.fold (fun var info acc -> if VarMap.mem var b.infos then acc else inject_slack var info acc) a.infos b in
