@@ -216,8 +216,6 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
   let meet (a: t) (b: t) =
     if equal a b then a else empty ()
 
-  let leq (a: t) (b: t) =
-    equal a b || is_empty b
 
 
   (**
@@ -323,6 +321,18 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
     let new_affeq = Matrix.linear_disjunct new_a.affeq new_b.affeq in
     {affeq = new_affeq; intervals = new_intervals; infos = new_a.infos}
 
+  let leq (a: t) (b: t) =
+    let drop_top_and_non_info_slacks var intv acc = 
+      if VarMap.mem var acc.infos || I.is_top intv 
+      then forget_var var acc 
+      else acc 
+    in
+    let processed_a = VarMap.fold drop_top_and_non_info_slacks a.intervals @@ reduce a  in
+    let processed_b = VarMap.fold drop_top_and_non_info_slacks b.intervals @@ reduce b in
+    let (a_common, b_common) = slack_lce processed_a processed_b in
+    VarMap.equal (fun v1 v2 -> CoeffVector.equal v1 v2) a_common.infos b_common.infos (*does CoeffVector.equal derive the correct equality?*)
+    && VarMap.for_all (fun k v -> I.leq v (VarMap.find k b_common.intervals)) a_common.intervals
+    && Matrix.is_covered_by b_common.affeq a_common.affeq
 
   let widen = join
   let narrow (a: t) (_b: t) = a
