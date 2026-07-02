@@ -254,7 +254,23 @@ same indices. Then it calls SubPolyDomain.join on the updated subpolyhedra. Adap
       | Some x, Some y -> {d = Some (SubPolyDomain.join x y); env = a.env }
 
 
-  let leq _a _b = failwith "SubPolyhedraDomain.leq: not implemented"
+  let leq a b =
+    let env_comp = Environment.cmp a.env b.env in (* Apron's Environment.cmp has defined return values. *)
+    if env_comp = -2 || env_comp > 0 then
+      (* -2:  environments are not compatible (a variable has different types in the 2 environements *)
+      (* -1: if env1 is a subset of env2,  (OK)  *)
+      (*  0:  if equality,  (OK) *)
+      (* +1: if env1 is a superset of env2, and +2 otherwise (the lce exists and is a strict superset of both) *)
+      false
+    else if is_bot a || is_top_env b then
+      true
+    else if is_bot b || is_top_env a then
+      false
+    else
+      let a_d, b_d = Option.get a.d, Option.get b.d in
+      let a_d' = if env_comp = 0 then a_d else dim_add (Environment.dimchange a.env b.env) a_d in
+      SubPolyDomain.leq a_d' b_d
+  
   let widen _a _b = failwith "SubPolyhedraDomain.widen: not implemented" (* join *)
   let narrow _a _b = failwith "SubPolyhedraDomain.narrow: not implemented" (* meet *)
   let unify _a _b = failwith "SubPolyhedraDomain.unify: not implemented" (* meet *)
