@@ -213,8 +213,6 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
     ^ "; slacks = [" ^ string_of_infos t.infos ^ "] }"
   
   let reduce = identity (*TODO: implement reduction with simplex or base exploration.*)
-  let meet (a: t) (b: t) =
-    if equal a b then a else empty ()
 
   let leq (a: t) (b: t) =
     equal a b || is_empty b
@@ -321,6 +319,18 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
     let new_b = reduce remapped_b in
     let new_intervals = interval_join new_a.intervals new_b.intervals in
     let new_affeq = Matrix.linear_disjunct new_a.affeq new_b.affeq in
+    {affeq = new_affeq; intervals = new_intervals; infos = new_a.infos}
+
+
+  let meet (a: t) (b: t) = 
+    (* 1. same environments and same indices for the slack variables -> do similarly to how its done in the join 
+      QUESTION: can i reuse these functions here? *)
+    let (remapped_a, remapped_b) = inject_slack_for_join @@ slack_lce a b in
+    let new_a = reduce remapped_a in
+    let new_b = reduce remapped_b in
+    (* 2. do the comparison: could be done with meet_tcons(??) *)
+    let new_intervals = failwith "todo: smth with  new_a.intervals new_b.intervals" in
+    let new_affeq = failwith "todo: smth like Matrix.linear_disjunct new_a.affeq new_b.affeq" in
     {affeq = new_affeq; intervals = new_intervals; infos = new_a.infos}
 
 
