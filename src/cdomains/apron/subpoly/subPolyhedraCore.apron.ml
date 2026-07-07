@@ -336,6 +336,7 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
   [leq a b]
   TODO: Reduce here will be called for every program point because leq is called a lot! 
         Maybe keep a reduced version at all times!
+  TODO: Matrix needs to be in rref!
   *)
   let leq (a: t) (b: t) =
     let drop_top_and_non_info_slacks var intv acc = 
