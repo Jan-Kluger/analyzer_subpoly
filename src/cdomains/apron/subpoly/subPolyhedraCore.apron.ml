@@ -223,7 +223,12 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
     ^ "; intervals = [" ^ string_of_interval_map t.intervals ^ "]"
     ^ "; slacks = [" ^ string_of_infos t.infos ^ "] }"
   
-  let reduce = identity (*TODO: implement reduction with simplex or base exploration.*)
+  let reduce (a : t) : t option = 
+    match Matrix.normalize a.affeq with 
+    | None -> None
+    | Some mat -> Some {a with affeq = mat}
+
+
   let meet (a: t) (b: t) =
     if equal a b then a else empty ()
 
@@ -319,18 +324,23 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
   let interval_join (a : interval_map) (b : interval_map) : interval_map = 
     VarMap.union (fun (key : Var.t) (v1 : I.t) (v2 : I.t) -> Some (I.join v1 v2)) a b
    
-    (**[join a b] returns a subpolyhedra resulting from the join of two subpolyhedras a and b.
-      We assume that the info fields of slack variables are canonical. 
-      Slack variables with an interval bound but no info field are discarded, as they cannot be matched
-      with slack variables from the other state.
-    *)
-  let join (a: t) (b: t) : t =
+  (**[join a b] returns a subpolyhedra resulting from the join of two subpolyhedras a and b.
+    We assume that the info fields of slack variables are canonical. 
+    Slack variables with an interval bound but no info field are discarded, as they cannot be matched
+    with slack variables from the other state.
+  *)
+  let join (a: t) (b: t) : t option =
     let (remapped_a, remapped_b) = inject_slack_for_join @@ slack_lce a b in
     let new_a = reduce remapped_a in
     let new_b = reduce remapped_b in
-    let new_intervals = interval_join new_a.intervals new_b.intervals in
-    let new_affeq = Matrix.linear_disjunct new_a.affeq new_b.affeq in
-    {affeq = new_affeq; intervals = new_intervals; infos = new_a.infos}
+    match new_a, new_b with 
+    | None, None -> None
+    | None, _ -> new_b
+    | _, None -> new_a
+    | Some x, Some y ->
+    let new_intervals = interval_join x.intervals y.intervals in
+    let new_affeq = Matrix.linear_disjunct x.affeq y.affeq in
+    Some {affeq = new_affeq; intervals = new_intervals; infos = x.infos}
 
   (**
   [leq a b]
@@ -344,8 +354,12 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
       then forget_var var acc 
       else acc 
     in
-    let processed_a = VarMap.fold drop_top_and_non_info_slacks a.intervals @@ reduce a  in
-    let processed_b = VarMap.fold drop_top_and_non_info_slacks b.intervals @@ reduce b in
+    match reduce a, reduce b with 
+    | None, _ -> true
+    | _, None -> false
+    | Some a', Some b' ->
+    let processed_a = VarMap.fold drop_top_and_non_info_slacks a.intervals a' in
+    let processed_b = VarMap.fold drop_top_and_non_info_slacks b.intervals b' in
     let (a_common, b_common) = slack_lce processed_a processed_b in
     VarMap.equal (fun v1 v2 -> CoeffVector.equal v1 v2) a_common.infos b_common.infos (*does CoeffVector.equal derive the correct equality?*)
     && VarMap.for_all (fun k v -> I.leq v (VarMap.find k b_common.intervals)) a_common.intervals
