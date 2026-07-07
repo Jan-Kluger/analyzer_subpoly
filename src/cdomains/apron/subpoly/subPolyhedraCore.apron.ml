@@ -321,17 +321,21 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
     let new_affeq = Matrix.linear_disjunct new_a.affeq new_b.affeq in
     {affeq = new_affeq; intervals = new_intervals; infos = new_a.infos}
 
-
+  (** [meet a b] returns a subpolyhedra resulting from the meet of two subpolyhedras a and b.
+      We assume that the info fields of slack variables are canonical. 
+      Slack variables with an interval bound but no info field are discarded, as they cannot be matched
+      with slack variables from the other state.
+  *)
   let meet (a: t) (b: t) = 
-    (* 1. same environments and same indices for the slack variables -> do similarly to how its done in the join 
-      QUESTION: can i reuse these functions here? *)
-    let (remapped_a, remapped_b) = inject_slack_for_join @@ slack_lce a b in
-    let new_a = reduce remapped_a in
-    let new_b = reduce remapped_b in
-    (* 2. do the comparison: could be done with meet_tcons(??) *)
-    let new_intervals = failwith "todo: smth with  new_a.intervals new_b.intervals" in
-    let new_affeq = failwith "todo: smth like Matrix.linear_disjunct new_a.affeq new_b.affeq" in
-    {affeq = new_affeq; intervals = new_intervals; infos = new_a.infos}
+    let (new_a, new_b) = slack_lce a b in
+    (* QUESTION: why does the join reduce? do we need this here to? *)
+    let new_intervals = 
+      (* TODO: check this!! expecially if union is correct *)
+      VarMap.union (fun (key : Var.t) (v1 : I.t) (v2 : I.t) ->  I.meet v1 v2) new_a.intervals new_b.intervals in   
+    let new_affeq = Matrix.rref_matrix new_a.affeq new_b.affeq in
+    match new_affeq with
+    | None -> empty ()
+    | Some new_affeq -> {affeq = new_affeq; intervals = new_intervals; infos = new_a.infos} (* TODO: maybe infos need to be from both? *)
 
 
   let widen = join

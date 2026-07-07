@@ -232,23 +232,22 @@ struct
   (* here we wire up the things from Core *)
   
 
-  let meet a b = (* concept copied from the join, just changed a few cases *) 
+  let meet a b = (* concept copied from the join, just changed a few cases. should be done now *) 
     if is_bot a then a 
     else if is_bot b then b
     else
-      let sup_env = Environment.lce a.env b.env in
       match a.d, b.d with 
       | None, _ -> b
       | _, None -> a
       | Some x, Some y when is_top_env a -> b
       | Some x, Some y when is_top_env b -> a
       | Some x, Some y when (Environment.cmp a.env b.env <> 0)->
+        let sup_env = Environment.lce a.env b.env in
         let a = dim_add (Environment.dimchange a.env sup_env) x in
         let b = dim_add (Environment.dimchange b.env sup_env) y in 
         {d = Some (SubPolyDomain.meet a b); env = sup_env}
       | Some x, Some y when SubPolyDomain.equal x y -> a
       | Some x, Some y -> {d = Some (SubPolyDomain.meet x y); env = a.env }
-        (* QUESTION: if the environments are the same, is the numbering of the slack varibales also the same? *)
 
 (**
 [join a b ] joins two subpolyhedra. It adapts the apron environment so that both share the 
