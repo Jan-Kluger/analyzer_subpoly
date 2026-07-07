@@ -249,9 +249,9 @@ same indices. Then it calls SubPolyDomain.join on the updated subpolyhedra. Adap
       | Some x, Some y when (Environment.cmp a.env b.env <> 0)->
        let a = dim_add (Environment.dimchange a.env sup_env) x in
        let b = dim_add (Environment.dimchange b.env sup_env) y in 
-       {d = Some (SubPolyDomain.join a  b); env = sup_env}
+       {d = (SubPolyDomain.join a  b); env = sup_env}
       | Some x, Some y when SubPolyDomain.equal x y -> a
-      | Some x, Some y -> {d = Some (SubPolyDomain.join x y); env = a.env }
+      | Some x, Some y -> {d = SubPolyDomain.join x y; env = a.env }
 
 
   let leq a b =
