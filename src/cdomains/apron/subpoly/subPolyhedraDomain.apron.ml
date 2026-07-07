@@ -169,7 +169,7 @@ module Slack_managment = struct
         (* Tweak interval *)
         let interval = RationalInterval.scale (Mpqf.one /: mpqf_of_z sign_factor) interval in
         (* the new slack goes at column n+m = the current constant-column index *)
-        let slack_col = Environment.size t.env + SubPolyDomain.num_slacks d in
+        let slack_col = Environment.size t.env + SubPolyDomain.num_slacks d in (*Not sure if this is safe, as there might be a gap no?*)
         { t with d = Some (SubPolyDomain.insert_slack slack_col normalized interval d) }
 end
 

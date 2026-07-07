@@ -120,7 +120,7 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
     Used in forget_vars.
   *) 
   let rem_infos_containing_var (infos : info_map) (var : Var.t) : info_map = 
-     VarMap.filter (fun _ (info : info) -> CoeffVector.nth info (Var.to_int var) =: Mpqf.zero) infos
+     VarMap.filter (fun _ (info : info) -> CoeffVector.nth info var =: Mpqf.zero) infos
   
   (**
     [forget_vars vars t] forgets a list of variables in the polyhedron.
@@ -332,6 +332,11 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
     let new_affeq = Matrix.linear_disjunct new_a.affeq new_b.affeq in
     {affeq = new_affeq; intervals = new_intervals; infos = new_a.infos}
 
+  (**
+  [leq a b]
+  TODO: Reduce here will be called for every program point because leq is called a lot! 
+        Maybe keep a reduced version at all times!
+  *)
   let leq (a: t) (b: t) =
     let drop_top_and_non_info_slacks var intv acc = 
       if VarMap.mem var acc.infos || I.is_top intv 
