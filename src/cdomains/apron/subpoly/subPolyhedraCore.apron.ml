@@ -303,11 +303,11 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
 
   (**
   [interval_join a b] takes two interval_maps and joins them using [RationalInterval.join].
-  QUESTION: How do we represent bottom in the interval domain?
+  QUESTION: How do we represent bottom in the interval domain? 
   *)
   let interval_join (a : interval_map) (b : interval_map) : interval_map = 
     VarMap.union (fun (key : Var.t) (v1 : I.t) (v2 : I.t) -> Some (I.join v1 v2)) a b
-   
+
     (**[join a b] returns a subpolyhedra resulting from the join of two subpolyhedras a and b.
       We assume that the info fields of slack variables are canonical. 
       Slack variables with an interval bound but no info field are discarded, as they cannot be matched
@@ -328,14 +328,17 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
   *)
   let meet (a: t) (b: t) = 
     let (new_a, new_b) = slack_lce a b in
-    (* QUESTION: why does the join reduce? do we need this here to? *)
+    let new_a = reduce new_a in
+    let new_b = reduce new_b in
+    (* TODO: do we actually need reduce here? why is it done in the join? *)
     let new_intervals = 
-      (* TODO: check this!! expecially if union is correct *)
-      VarMap.union (fun (key : Var.t) (v1 : I.t) (v2 : I.t) ->  I.meet v1 v2) new_a.intervals new_b.intervals in   
+      VarMap.union (fun (key : Var.t) (v1 : I.t) (v2 : I.t) -> (I.meet v1 v2)) new_a.intervals new_b.intervals in
     let new_affeq = Matrix.rref_matrix new_a.affeq new_b.affeq in
     match new_affeq with
-    | None -> empty ()
-    | Some new_affeq -> {affeq = new_affeq; intervals = new_intervals; infos = new_a.infos} (* TODO: maybe infos need to be from both? *)
+    | None -> empty () 
+    | Some new_affeq -> 
+      {affeq = new_affeq; intervals = new_intervals; infos = new_a.infos}
+      (* nach slack_lce sollten die infos gleich sein, desweegn kann man hier einfach das von a verwenden *)
 
 
   let widen = join
