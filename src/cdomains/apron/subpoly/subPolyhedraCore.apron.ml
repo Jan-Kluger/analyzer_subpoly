@@ -1,8 +1,7 @@
 module Mpqf = SharedFunctions.Mpqf
 open Intervalsig
-
+open OcplibSimplex
 include Batteries
-
 
 (** Variable type used by the subpolyhedra core. *)
 module type Var = sig
@@ -14,8 +13,63 @@ module type Var = sig
   val to_t : int -> t
 end
 
+(** Simplex solver instantiation used by the LP-based reduction.
+    LP variables are matrix column indices (>= 0) *)
+module Simplex = struct
+  (** The number type the solver computes with, for constraint coefficients, bounds and
+      solution values alike. ocplib-simplex demands its own [Rationals] interface
+      (extSigs.mli), which Mpqf almost satisfies: this adapter is mostly renames
+      ([mult] = [mul], [minus] = [neg], [sign] = [sgn], ...) plus [floor]/[ceiling]/[is_int],
+      which Mpqf lacks. With rationals we dont have the float imperciscion *)
+  module LpRat = struct
+    include Mpqf
+    let m_one = mone
+    let sign = sgn
+    let is_zero x = equal x zero
+    let is_one x = equal x one
+    let is_m_one x = equal x m_one
+    let mult = mul
+    let minus = neg
+    let min a b = if cmp a b <= 0 then a else b
+    let is_int x = Z.equal (get_den x) Z.one
+    let of_z z = of_mpz @@ Z_mlgmpidl.mpzf_of_z z
+    let floor x = of_z @@ Z.fdiv (get_num x) (get_den x)
+    let ceiling x = of_z @@ Z.cdiv (get_num x) (get_den x)
+  end
+
+  (** The solver's variable type: plain ints. Non-negative values are matrix column
+      indices (program and slack columns); negative values are internal handles that
+      name equality rows (see [assert_row]), so the two can never collide.
+      [is_int = false] declares variables rational-valued: we solve over Q, not an
+      integer LP. *)
+  module LpVar = struct
+    type t = int
+    let compare = Int.compare
+    let is_int _ = false
+    let print fmt v = Format.fprintf fmt "v%d" v
+  end
+
+  (** "Explanations" are labels an SMT solver *)
+  module LpEx = struct
+    type t = unit
+    let empty = ()
+    let union () () = ()
+    let print fmt () = Format.fprintf fmt "()"
+  end
+
+  (* [Basic.Make] wires the three parameter modules into the full solver and exposes:
+     [Core]   solver state [Core.t], bounds, polys [Core.P] and the [result] type;
+     [Assert] adding constraints ([Assert.var] bounds a variable, [Assert.poly] a linear form);
+     [Solve]  running the algorithm ([Solve.solve] feasibility, [Solve.maximize] optimization);
+     [Result] decoding a solved state into Sat/Unsat/Max/Unbounded. *)
+  include Basic.Make (LpVar) (LpRat) (LpEx)
+end
+
+open Simplex
+
+
 (** Internal representation of a consistent subpolyhedron. *)
-module SubPoly (Var : Var) (I : IntervalSig) = struct
+module SubPoly (Var : Var) (I : IntervalSig with type bound = Mpqf.t) = struct
   (* Reuse the SparseVector and ListMatrix modules from the AffineEqualityDomain. *)
   include RatOps.ConvenienceOps (Mpqf)
 
@@ -224,10 +278,112 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
     ^ "; intervals = [" ^ string_of_interval_map t.intervals ^ "]"
     ^ "; slacks = [" ^ string_of_infos t.infos ^ "] }"
   
-  let reduce (a : t) : t option = 
-    match Matrix.normalize a.affeq with 
-    | None -> None
-    | Some mat -> Some {a with affeq = mat}
+
+  (** Raised internally when the LP built from an abstract state is inconsistent, *)
+  exception Infeasible
+
+  (** A non-strict solver bound (we carry no explanations). *)
+  let lp_bound (v: Mpqf.t) : Core.bound = { Core.bvalue = Core.R2.of_r v; explanation = () }
+
+  (** [assert_row (env, i) row] asserts a matrix row [a_1*v_1 + ... + a_k*v_k + c = 0]
+      as [sum in [-c, -c]] in the solver. Multi-variable rows are registered under the
+      fresh negative handle [-(i+1)]. single-variable rows must use [Assert.var] instead
+      ([Assert.poly] requires >= 2 variables). *)
+  let assert_row ((env, i): Core.t * int) (row: CoeffVector.t) : Core.t * int =
+    (* Get index of the constant term *)
+    let const_idx = CoeffVector.length row - 1 in
+
+    (* partition into coefficients cand consts *)
+    let coeffs, consts = List.partition (fun (j, _) -> j <> const_idx) (CoeffVector.to_sparse_list row) in
+
+    (* get the const from the row *)
+    let c = match consts with [] -> Mpqf.zero | (_, c) :: _ -> c in
+
+    match coeffs with
+    | [] -> if c =: Mpqf.zero then (env, i) else raise Infeasible (* row reads 0 = c with c <> 0 *)
+    | [(j, a)] ->
+      (* We only have one coefficient (for some reason poly is 2 or more coefficients) 
+      add degenerate interval to simplex *)
+      let b = lp_bound (Mpqf.neg c /: a) in (* a*v_j + c = 0  <=>  v_j = -c/a *)
+      (fst @@ Assert.var env ~min:b ~max:b j, i)
+    | _ ->
+      (* insert equation with equality *)
+      let b = lp_bound (Mpqf.neg c) in
+      (fst @@ Assert.poly env (Core.P.from_list coeffs) ~min:b ~max:b (-(i + 1)), i + 1)
+
+  (** [assert_interval var intv env] asserts the finite bounds of [intv] on [var]. *)
+  let assert_interval (var: Var.t) (intv: I.t) (env: Core.t) : Core.t =
+    (* if interval has bounds, then insert *)
+    match I.bounds intv with
+    | None, None -> env
+    | lower, upper -> fst @@ Assert.var env ?min:(Option.map lp_bound lower) ?max:(Option.map lp_bound upper) (Var.to_int var)
+
+  (** [optimize env col coeff] is the optimum of [coeff * v_col]: [Some m] is the exact
+      maximum, [None] means unbounded. A strict optimum [m - eps] is reported with value
+      [m], which is still a sound bound. Raises [Infeasible] on an inconsistent system. *)
+  let optimize (env: Core.t) (col: LpVar.t) (coeff: Mpqf.t) : Core.t * Mpqf.t option =
+    let env, opt = Solve.maximize env (Core.P.from_list [(col, coeff)]) in
+    match Result.get opt env with
+    | Core.Max (mx, _) -> env, Some (Lazy.force mx).Core.max_v.Core.bvalue.Core.R2.v
+    | Core.Unbounded _ -> env, None
+    | Core.Unsat _ -> raise Infeasible
+    | Core.Sat _ | Core.Unknown -> env, None (* no bound information: keep the old interval *)
+
+  (** [refine_interval var intv (env, acc)] meets [intv] with the tightest bounds the
+      solver can derive for [var] and adds the result to [acc]. *)
+  let refine_interval (var: Var.t) (intv: I.t) ((env, acc): Core.t * interval_map) : Core.t * interval_map =
+    (* get collumn to refine *)
+    let col = Var.to_int var in
+
+    (* optimze to get upper and lower *)
+    let env, upper = optimize env col Mpqf.one in
+    let env, neg_lower = optimize env col Mpqf.mone in
+
+    (* revert negation trick *)
+    let lower = Option.map Mpqf.neg neg_lower in
+
+    (* meet with old interval to get the new bounds for the new interval *)
+    match I.meet intv (I.of_bounds ~lower ~upper) with
+    | None -> raise Infeasible
+    | Some intv' -> (env, VarMap.add var intv' acc)
+
+  (** [reduce t] is the LP-based redu
+      after normalizing the matrix (rref), for every variable with an interval it computes, via simplex, 
+      the tightest bounds implied by the affine equalities together with all other interval bounds, and meets
+      them with the stored interval. 
+      Returns [None] iff the constraint system is infeasible, i.e. the state is bottom.
+        
+      The algorithm is basically, Setup the simplex, make one run to make sure we are feasable,
+      if feasable, complete run, update all intervals and return new domain. If infeasable, return none
+    *)
+  let reduce (t: t) : t option =
+    try
+      if Matrix.is_empty t.affeq then Some t (* no equalities: nothing to propagate *)
+      else begin
+        match Matrix.normalize t.affeq with
+        | None -> None (* inconsistent equalities *)
+        | Some mat ->
+          (* T is now normalized matrix *)
+          let t = { t with affeq = mat } in
+
+          (* Make new simplex instance *)
+          let env = Core.empty ~is_int:false ~check_invs:false in
+
+          (* Add rows and intervals *)
+          let env, _ = Matrix.fold_left assert_row (env, 0) t.affeq in
+          let env = VarMap.fold assert_interval t.intervals env in
+
+          (* Feasibility check up front: bottom must be detected even when [t.intervals] is
+             empty and the refine fold below consequently never queries the solver. *)
+          (match Result.get None (Solve.solve env) with
+           | Core.Unsat _ -> raise Infeasible
+           | _ -> ());
+
+          (* Update the domain if we are feasable.*)
+          let _, new_intervals = VarMap.fold refine_interval t.intervals (env, VarMap.empty) in
+          Some { t with intervals = new_intervals }
+      end
+    with Infeasible -> None
 
 
   (**
