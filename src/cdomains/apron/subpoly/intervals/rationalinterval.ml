@@ -39,6 +39,10 @@ module RationalInterval : Intervalsig.IntervalSig with type bound = Mpqf.t = str
 
   let of_bounds ~lower ~upper = (lower, upper)
 
+  (* bounds *)
+
+  let bounds ((l, u) : t) = (l, u)
+
   (* scale *)
 
   let scale_bound (factor : bound) (b : bound option) =
