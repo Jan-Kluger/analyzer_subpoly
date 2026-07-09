@@ -474,12 +474,27 @@ module SubPoly (Var : Var) (I : IntervalSig with type bound = Mpqf.t) = struct
     let new_b = VarMap.fold (fun var info acc -> if VarMap.mem var b.infos then acc else inject_slack var info acc) a.infos b in
     (new_a, new_b)
 
+  let inject_slack_for_widen (a, b) = 
+    let inject_slack var info x = 
+      let new_intervals = VarMap.add var I.top x.intervals in
+      let new_infos = VarMap.add var info x.infos in
+      let new_affeq = Matrix.append_row x.affeq (CoeffVector.set_nth info var (Mpqf.of_int (-1))) in
+      {affeq = new_affeq; infos = new_infos; intervals = new_intervals} in
+    let new_a = VarMap.fold (fun var info acc -> if VarMap.mem var a.infos then acc else inject_slack var info acc ) b.infos a in
+    (*let new_b = VarMap.fold (fun var info acc -> if VarMap.mem var b.infos then acc else inject_slack var info acc) a.infos b in*)
+    (new_a, b)
   (**
   [interval_join a b] takes two interval_maps and joins them using [RationalInterval.join].
   QUESTION: How do we represent bottom in the interval domain? 
   *)
   let interval_join (a : interval_map) (b : interval_map) : interval_map = 
     VarMap.union (fun (key : Var.t) (v1 : I.t) (v2 : I.t) -> Some (I.join v1 v2)) a b
+  (**
+  [interval_widen a b] takes two interval_maps and widens them using [RationalInterval.widen].
+  QUESTION: How do we represent bottom in the interval domain? 
+  *)
+  let interval_widen (a : interval_map) (b : interval_map) : interval_map = 
+    VarMap.union (fun (key : Var.t) (v1 : I.t) (v2 : I.t) -> Some (I.widen v1 v2)) a b
    
   (**[join a b] returns a subpolyhedra resulting from the join of two subpolyhedras a and b.
     We assume that the info fields of slack variables are canonical. 
@@ -546,7 +561,22 @@ module SubPoly (Var : Var) (I : IntervalSig with type bound = Mpqf.t) = struct
       (* nach slack_lce sollten die infos gleich sein, desweegn kann man hier einfach das von a verwenden *)
 
 
-  let widen = join
+  let widen a b =
+    let (remapped_a, remapped_b) = inject_slack_for_widen @@ slack_lce a b in
+    (*let new_a = reduce remapped_a in*)
+    let norm_a = Matrix.normalize a.affeq in
+    let new_a = match norm_a with 
+      | None -> None
+      | Some x -> Some {remapped_a with affeq = x} in
+    let new_b = reduce remapped_b in
+    match new_a, new_b with
+    | None, None -> None
+    | None, _ -> new_b
+    | _, None -> new_a
+    | Some x, Some y ->
+    let new_intervals = interval_widen x.intervals y.intervals in
+    let new_affeq = Matrix.linear_disjunct x.affeq y.affeq in
+    Some {affeq = new_affeq; intervals = new_intervals; infos = x.infos}
   let narrow (a: t) (b: t) = a
   let unify = meet
 
