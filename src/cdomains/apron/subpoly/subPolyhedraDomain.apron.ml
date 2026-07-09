@@ -285,6 +285,27 @@ same indices. Then it calls SubPolyDomain.join on the updated subpolyhedra. Adap
       | Some x, Some y when SubPolyDomain.equal x y -> a
       | Some x, Some y -> {d = SubPolyDomain.join x y; env = a.env }
 
+(**
+[widen a b ] joins two subpolyhedra. It adapts the apron environment so that both share the
+same indices. Then it calls SubPolyDomain.widen on the updated subpolyhedra. Adapted from ltve.
+*)
+  let widen a b =
+    if is_bot a then b
+    else if is_bot b then a
+    else 
+      let sup_env = Environment.lce a.env b.env in
+      match a.d, b.d with 
+      | None, _ -> b
+      | _, None -> a
+      | Some x, Some y when is_top_env a || is_top_env b ->
+       {d = Some (SubPolyDomain.empty ()); env = sup_env}
+      | Some x, Some y when (Environment.cmp a.env b.env <> 0)->
+       let a = dim_add (Environment.dimchange a.env sup_env) x in
+       let b = dim_add (Environment.dimchange b.env sup_env) y in 
+       {d = (SubPolyDomain.widen a  b); env = sup_env}
+      | Some x, Some y when SubPolyDomain.equal x y -> a
+      | Some x, Some y -> {d = SubPolyDomain.widen x y; env = a.env }
+
 
   let leq a b =
     let env_comp = Environment.cmp a.env b.env in (* Apron's Environment.cmp has defined return values. *)
