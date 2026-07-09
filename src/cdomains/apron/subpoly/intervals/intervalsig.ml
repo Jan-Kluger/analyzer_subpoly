@@ -16,6 +16,11 @@ module type IntervalSig = sig
       [lower = None] means no lower bound. [upper = None] means no upper bound. *)
   val of_bounds : lower:bound option -> upper:bound option -> t
 
+  (** Returns the (lower, upper) bounds of an interval.
+
+      [None] means unbounded on that side. Inverse of [of_bounds]. *)
+  val bounds : t -> bound option * bound option
+
   (** Scales both interval bounds by the given factor.
 
       If the factor is negative, lower and upper bounds are swapped. *)
