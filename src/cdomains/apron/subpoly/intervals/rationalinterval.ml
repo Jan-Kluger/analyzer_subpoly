@@ -114,6 +114,10 @@ module RationalInterval : Intervalsig.IntervalSig with type bound = Mpqf.t = str
   let leq ((l1, u1) : t) ((l2, u2) : t) =
     lower_leq l2 l1 && upper_leq u1 u2
 
+  let widen ((l1, u1) : t) ((l2, u2) : t) : t = 
+    let fst = if lower_leq l1 l2 then l1 else None in
+    let snd = if upper_leq u2 u1 then u1 else None in
+    (fst, snd)
   (* show *)
 
   let show_bound (b : bound option) =

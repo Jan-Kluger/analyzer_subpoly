@@ -44,7 +44,7 @@ module type IntervalSig = sig
 
       [leq x y] holds when [x] is contained in [y]. *)
   val leq : t -> t -> bool
-
+  val widen: t -> t -> t
   (** Human-readable representation of an interval. *)
   val show : t -> string
 end
