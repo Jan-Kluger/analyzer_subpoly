@@ -55,21 +55,35 @@ module RationalInterval : Intervalsig.IntervalSig with type bound = Mpqf.t = str
     let add_opt = Option.map (fun x -> Mpqf.add x c) in
     add_opt l, add_opt u
 
-  (* meet *)
+  (* Bound helpers. The [None] interpretation differs by position:
+     for lower bounds [None] means -inf, for upper bounds it means +inf.
+     [*_lower] treat None as -inf, [*_upper] treat None as +inf. *)
 
-  let min_bound (a : bound option) (b : bound option) =
+  let min_lower (a : bound option) (b : bound option) =
     match a, b with
-    | None, _ | _, None -> None
+    | None, _ | _, None -> None 
     | Some a, Some b -> Some (if Mpqf.compare a b <= 0 then a else b)
 
-  let max_bound (a : bound option) (b : bound option) =
+  let max_lower (a : bound option) (b : bound option) =
     match a, b with
-    | None, x | x, None -> x
+    | None, x | x, None -> x 
     | Some a, Some b -> Some (if Mpqf.compare a b >= 0 then a else b)
 
+  let min_upper (a : bound option) (b : bound option) =
+    match a, b with
+    | None, x | x, None -> x 
+    | Some a, Some b -> Some (if Mpqf.compare a b <= 0 then a else b)
+
+  let max_upper (a : bound option) (b : bound option) =
+    match a, b with
+    | None, _ | _, None -> None 
+    | Some a, Some b -> Some (if Mpqf.compare a b >= 0 then a else b)
+
+  (* meet *)
+
   let meet ((l1, u1) : t) ((l2, u2) : t) =
-    let lower = max_bound l1 l2 in
-    let upper = min_bound u1 u2 in
+    let lower = max_lower l1 l2 in
+    let upper = min_upper u1 u2 in
     match lower, upper with
     | Some l, Some u when Mpqf.compare l u > 0 -> None
     | _ -> Some (lower, upper)
@@ -77,7 +91,7 @@ module RationalInterval : Intervalsig.IntervalSig with type bound = Mpqf.t = str
   (* join *)
 
   let join ((l1, u1) : t) ((l2, u2) : t) =
-    min_bound l1 l2, max_bound u1 u2
+    min_lower l1 l2, max_upper u1 u2
 
   (* leq *)
 
