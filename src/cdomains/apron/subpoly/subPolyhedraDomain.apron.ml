@@ -175,9 +175,17 @@ module Slack_managment = struct
         let interval = RationalInterval.scale (Mpqf.one /: mpqf_of_z sign_factor) interval in
         (* add the constant into the interval*)
         let interval = RationalInterval.add_const (Mpqf.neg const) interval in
-        (* the new slack goes at column n+m = the current constant-column index *)
-        let slack_col = Environment.size t.env + SubPolyDomain.num_slacks d in (*Not sure if this is safe, as there might be a gap no?*)
-        { t with d = Some (SubPolyDomain.insert_slack slack_col info interval d) }
+        let find_key_on_info map info = Seq.find (fun (_, v) -> SubPolyDomain.info_equal v info) @@ SubPolyDomain.VarMap.to_seq map in
+        match find_key_on_info  d.infos info with 
+        | None -> (*There is no slack yet with that info, we insert a new one.*)
+          (* the new slack goes at column n+m = the current constant-column index *)
+          let slack_col = Environment.size t.env + SubPolyDomain.num_slacks d in (*Not sure if this is safe, as there might be a gap no?*)
+          { t with d = Some (SubPolyDomain.insert_slack slack_col info interval d) }
+        | Some (k, _) -> (* We already have a slack with that info and update its interval.*)
+          match RationalInterval.meet (SubPolyDomain.VarMap.find k d.intervals) interval with 
+          | None -> bot_env
+          | Some i -> {t with d = Some (SubPolyDomain.set_intv k i d)} 
+        
 end
 
 module ExpressionBounds: (SharedFunctions.ConvBounds with type t = VarManagement.t) = struct
