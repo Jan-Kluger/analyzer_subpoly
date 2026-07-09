@@ -237,7 +237,11 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
   let slack_lce a b = 
     (*[find_next_slack_idx (map_a, map_b)] finds the next free index in the shared slack variable space of a and b.*)
     let find_next_slack_idx (map_a, map_b) =
-      if IntMap.is_empty map_a && IntMap.is_empty map_b then fst @@ VarMap.min_binding a.intervals (*If no mapping is present, we just use the first slack index from a.*)
+      if IntMap.is_empty map_a && IntMap.is_empty map_b 
+      then match VarMap.min_binding_opt a.intervals, VarMap.min_binding_opt b.intervals with 
+        | Some (ka, _), Some (kb, _) -> Int.min ka kb
+        | Some (k, _), None | None, Some (k, _) -> k
+        | None, None -> 0
       else let update_maximum_idx _ v m = max v m in (*find the smallest index that is available: *)
         (IntMap.fold update_maximum_idx map_b @@ IntMap.fold update_maximum_idx map_a 0) + 1
     in
