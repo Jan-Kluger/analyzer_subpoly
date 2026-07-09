@@ -353,12 +353,12 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
       then forget_var var acc 
       else acc 
     in
-    match reduce a, reduce b with 
+    match Matrix.normalize a.affeq, Matrix.normalize b.affeq with 
     | None, _ -> true
     | _, None -> false
-    | Some a', Some b' ->
-    let processed_a = VarMap.fold drop_top_and_non_info_slacks a.intervals a' in
-    let processed_b = VarMap.fold drop_top_and_non_info_slacks b.intervals b' in
+    | Some a_affeq, Some b_affeq ->
+    let processed_a = VarMap.fold drop_top_and_non_info_slacks a.intervals {a with affeq= a_affeq} in
+    let processed_b = VarMap.fold drop_top_and_non_info_slacks b.intervals {b with affeq= b_affeq} in
     let (a_common, b_common) = slack_lce processed_a processed_b in
     VarMap.equal (fun v1 v2 -> info_equal v1 v2) a_common.infos b_common.infos (*does CoeffVector.equal derive the correct equality?*)
     && VarMap.for_all (fun k v -> I.leq v (VarMap.find k b_common.intervals)) a_common.intervals
