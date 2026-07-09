@@ -285,8 +285,9 @@ same indices. Then it calls SubPolyDomain.join on the updated subpolyhedra. Adap
       | Some x, Some y when SubPolyDomain.equal x y -> a
       | Some x, Some y -> {d = SubPolyDomain.join x y; env = a.env }
 
+
 (**
-[widen a b ] joins two subpolyhedra. It adapts the apron environment so that both share the
+[widen a b ] widens two subpolyhedra. It adapts the apron environment so that both share the
 same indices. Then it calls SubPolyDomain.widen on the updated subpolyhedra. Adapted from ltve.
 *)
   let widen a b =
