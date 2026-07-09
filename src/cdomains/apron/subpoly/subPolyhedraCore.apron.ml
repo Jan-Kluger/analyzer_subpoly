@@ -109,43 +109,65 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
     { t with affeq = Matrix.append_row t.affeq row }
   
 
-  (**
-    [rem_row_containing_var affeq var] uses [Matrix.reduce_col] and [Matrix.remove_zero_rows] to remove all occurences of the variable from a matrix. 
+  (**[remove_columns dim t compact] is a helper for forget_vars and dim_remove that 
+     forgets about a column and can compact it at the same tims.
+      @param dim represents the dimensions that are forgotten
+      @param t subpolyhedra
+      @param compact determines if the forgotten columns should be compacted to fill the gaps,
+        used for keeping the slack indices small and for dim_remove.
+  *)
+  let remove_columns (dim : int array) (t : t) (compact : bool) : t = 
+    let shift_index_remove (old_index : Var.t) (dim_list : int list) : Var.t = 
+      if compact then old_index - (List.count_matching (fun x -> x < old_index) dim_list) else old_index in
+    let dim_list = List.sort_uniq Int.compare (Array.to_list dim) in 
+    let dim_set = Set.of_list dim_list in
+    let new_affeq = 
+      (if compact then (flip Matrix.del_cols) (Array.of_list dim_list) else identity) 
+      @@ Matrix.remove_zero_rows 
+      @@ List.fold_left (fun acc var -> Matrix.reduce_col acc var) t.affeq dim_list 
+    in
+    let new_intervals = 
+      VarMap.fold 
+        (fun var intv acc -> 
+           if Set.mem var dim_set 
+           then acc 
+           else VarMap.add (shift_index_remove var dim_list) intv acc ) t.intervals VarMap.empty 
+    in
+    let new_infos = 
+      let keep info = List.for_all (fun idx -> CoeffVector.nth info idx =: Mpqf.zero) dim_list in
+      VarMap.fold (fun var info acc ->
+        if Set.mem var dim_set || not (keep info)
+        then acc
+        else 
+          let info = if compact then CoeffVector.remove_at_indices info dim_list else info in
+          VarMap.add (shift_index_remove var dim_list) info acc)
+        t.infos VarMap.empty
+    in
+    {affeq = new_affeq; intervals = new_intervals; infos = new_infos}
 
-    Used in forget_vars.
-  *)  
-  let rem_rows_containing_var (affeq : affeq) (var : Var.t) : affeq = 
-    if Matrix.is_empty affeq then affeq
-    else 
-      Matrix.remove_zero_rows @@ Matrix.reduce_col affeq (Var.to_int var)
-
-  (**
-    [rem_infos_containing_var slacks var] takes a slack_map and removes all slack variables whose info contains mention of the var.
-
-    Used in forget_vars.
-  *) 
-  let rem_infos_containing_var (infos : info_map) (var : Var.t) : info_map = 
-     VarMap.filter (fun _ (info : info) -> CoeffVector.nth info var =: Mpqf.zero) infos
-  
+    
   (**
     [forget_vars vars t] forgets a list of variables in the polyhedron.
-
+    For slack variables it compacts the indices such that slack variables indices do not carry gaps.
     Future TODO: Currently we do Gaussian elimination with the variable as pivot ([Matrix.reduce_col]).
     This is fine for the affeq, but we do not want to blindly remove any slack variable info containing x
     from our info_map. Currently this happens, but refinement is needed in the future!
   *)
-  let forget_vars (vars: Var.t list) (t: t) = 
-    let new_affeq = List.fold_left rem_rows_containing_var t.affeq vars in
-    let new_intervals = List.fold_left (flip VarMap.remove) t.intervals vars in
-    let new_infos = List.fold_left rem_infos_containing_var t.infos vars in
-      {affeq = new_affeq ; intervals = new_intervals ; infos = new_infos}
+  let forget_vars (vars: Var.t list) (t: t) =
+    let dim_array = Array.of_list vars in
+    match List.partition (flip VarMap.mem t.intervals) vars with 
+    | [], [] -> t
+    | [], _ -> remove_columns dim_array t false
+    | _, [] -> remove_columns dim_array t true
+    | slack_vars, prog_vars -> remove_columns (Array.of_list prog_vars) (remove_columns (Array.of_list slack_vars) t true) false
+
   
   (**
   [forget_var var t] forgets a single variable using [forget_vars].
   *)
   let forget_var (var : Var.t) (t: t) : t = 
-    forget_vars [var] t
-  
+    let compact = VarMap.mem var t.intervals in
+    remove_columns (Array.singleton var) t compact
 
   (**
   [dim_add] Apron dimension change
@@ -181,32 +203,8 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
   (**
   [dim_remove] Apron dimension change
   *)
-  let dim_remove (ch: Apron.Dim.change) (t: t) =
-    let shift_index_remove (old_index : Var.t) (dim_list : int list) : Var.t = 
-      (let k = List.fold_left (fun acc index -> 
-        if index < (Var.to_int old_index) 
-        then acc + 1 
-        else acc) 0 dim_list
-    in let new_index = (Var.to_int old_index) - k 
-    in Var.to_t new_index) in
-    let new_infos_remove (infos : info_map) dim_list : info_map = 
-    VarMap.fold (fun var info acc ->
-      let new_var = shift_index_remove var dim_list in
-      let new_info = CoeffVector.remove_at_indices info dim_list in
-      VarMap.add new_var new_info acc) infos VarMap.empty in
-    let new_intervals_remove (intervals : interval_map) dim_list : interval_map =
-      VarMap.fold( fun var interval acc ->
-          let new_var = shift_index_remove var dim_list in
-          VarMap.add new_var interval acc
-        ) intervals VarMap.empty 
-      in
-    let new_affeq = Matrix.dim_remove ch t.affeq in
-    let dim_list = Array.to_list ch.dim in
-    let new_t = forget_vars (List.map Var.to_t dim_list) t in
-    let dim_list = List.sort_uniq Int.compare dim_list in (* remove duplicates *)
-    let new_infos = new_infos_remove new_t.infos dim_list in 
-    let new_intervals = new_intervals_remove new_t.intervals dim_list in
-    {affeq = new_affeq; infos = new_infos; intervals = new_intervals}
+  let dim_remove (ch : Apron.Dim.change) (t : t) = 
+    remove_columns ch.dim t true
 
   let string_of_interval_map (m: interval_map) =
     VarMap.bindings m
@@ -288,8 +286,8 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
       let new_affeq  = Matrix.map (fun row -> remap_vector_sparse row mapping len) a.affeq in 
       {affeq = new_affeq; intervals = new_intervals; infos = new_infos} in
     (*Remove slacks that have no info because they cannot be kept in the join:*)
-    let a_with_slacks_removed = VarMap.fold (fun var _ acc -> if not @@ VarMap.mem var a.infos then forget_var var acc else acc) a.intervals a in 
-    let b_with_slacks_removed = VarMap.fold (fun var _ acc -> if not @@ VarMap.mem var b.infos then forget_var var acc else acc) b.intervals b in 
+    let a_with_slacks_removed = forget_vars (VarMap.fold (fun var _ acc -> if not @@ VarMap.mem var a.infos then var :: acc else acc) a.intervals []) a in 
+    let b_with_slacks_removed = forget_vars (VarMap.fold (fun var _ acc -> if not @@ VarMap.mem var b.infos then var :: acc else acc) b.intervals []) b in 
     let (a_mapping, b_mapping) = get_mapping a_with_slacks_removed b_with_slacks_removed in
     let len = (find_next_slack_idx (a_mapping, b_mapping)) + 1 in
     let a_remapped = remap_slacks a_with_slacks_removed a_mapping len in
@@ -348,17 +346,18 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
   TODO: Matrix needs to be in rref!
   *)
   let leq (a: t) (b: t) =
-    let drop_top_and_non_info_slacks var intv acc = 
-      if VarMap.mem var acc.infos || I.is_top intv 
-      then forget_var var acc 
-      else acc 
+    let collect_top_and_non_info (x : t) = 
+      VarMap.fold (fun var intv acc -> 
+          if (not @@ VarMap.mem var x.infos) || I.is_top intv 
+          then var :: acc 
+          else acc ) x.intervals []
     in
     match Matrix.normalize a.affeq, Matrix.normalize b.affeq with 
     | None, _ -> true
     | _, None -> false
     | Some a_affeq, Some b_affeq ->
-    let processed_a = VarMap.fold drop_top_and_non_info_slacks a.intervals {a with affeq= a_affeq} in
-    let processed_b = VarMap.fold drop_top_and_non_info_slacks b.intervals {b with affeq= b_affeq} in
+    let processed_a = forget_vars (collect_top_and_non_info {a with affeq = a_affeq}) {a with affeq = a_affeq} in
+    let processed_b = forget_vars (collect_top_and_non_info {b with affeq = b_affeq}) {b with affeq = b_affeq} in
     let (a_common, b_common) = slack_lce processed_a processed_b in
     VarMap.equal (fun v1 v2 -> info_equal v1 v2) a_common.infos b_common.infos (*does CoeffVector.equal derive the correct equality?*)
     && VarMap.for_all (fun k v -> I.leq v (VarMap.find k b_common.intervals)) a_common.intervals
