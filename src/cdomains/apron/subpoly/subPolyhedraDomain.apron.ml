@@ -157,7 +157,8 @@ module Slack_managment = struct
         ) d.intervals acc
 
   (** [add_slack_constraint t linexpr interval] introduces a fresh slack [s = linexpr]
-      constrained to [interval]. *)
+      constrained to [interval]. Here the constant is pulled out of the linear expression
+      into the interval and also stripped out of the info.*)
   let add_slack_constraint (t: t) (linexpr: linexpr) (interval: RationalInterval.t) : t =
     if is_bot_env t then t
     else
@@ -166,11 +167,17 @@ module Slack_managment = struct
       | Some d ->
         (* normalize expr and then insert when adding slacks *)
         let normalized, sign_factor = normalize_info linexpr in
+        (*get normalized const*)
+        let const = CoeffVector.nth normalized ((CoeffVector.length normalized) - 1) in
+        (*Strip constant of info*)
+        let info = CoeffVector.set_nth normalized ((CoeffVector.length normalized) - 1) Mpqf.zero in
         (* Tweak interval *)
         let interval = RationalInterval.scale (Mpqf.one /: mpqf_of_z sign_factor) interval in
+        (* add the constant into the interval*)
+        let interval = RationalInterval.add_const (Mpqf.neg const) interval in
         (* the new slack goes at column n+m = the current constant-column index *)
         let slack_col = Environment.size t.env + SubPolyDomain.num_slacks d in (*Not sure if this is safe, as there might be a gap no?*)
-        { t with d = Some (SubPolyDomain.insert_slack slack_col normalized interval d) }
+        { t with d = Some (SubPolyDomain.insert_slack slack_col info interval d) }
 end
 
 module ExpressionBounds: (SharedFunctions.ConvBounds with type t = VarManagement.t) = struct
