@@ -232,11 +232,6 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
     | Some mat -> Some {a with affeq = mat}
 
 
-  let meet (a: t) (b: t) =
-    if equal a b then a else empty ()
-
-
-
   (**
      [slack_lce a b] takes two subpolyhedra [a] and [b] and maps the slack variables into a common environment based on the info field.
      - we assume that infos in the info map are canonicalized to check equality.
@@ -323,7 +318,7 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
 
   (**
   [interval_join a b] takes two interval_maps and joins them using [RationalInterval.join].
-  QUESTION: How do we represent bottom in the interval domain?
+  QUESTION: How do we represent bottom in the interval domain? 
   *)
   let interval_join (a : interval_map) (b : interval_map) : interval_map = 
     VarMap.union (fun (key : Var.t) (v1 : I.t) (v2 : I.t) -> Some (I.join v1 v2)) a b
@@ -368,9 +363,32 @@ module SubPoly (Var : Var) (I : IntervalSig) = struct
     VarMap.equal (fun v1 v2 -> info_equal v1 v2) a_common.infos b_common.infos (*does CoeffVector.equal derive the correct equality?*)
     && VarMap.for_all (fun k v -> I.leq v (VarMap.find k b_common.intervals)) a_common.intervals
     && Matrix.is_covered_by b_common.affeq a_common.affeq
+    
+  (** [meet a b] returns a subpolyhedra resulting from the meet of two subpolyhedras a and b.
+      We assume that the info fields of slack variables are canonical. 
+      Slack variables with an interval bound but no info field are discarded, as they cannot be matched
+      with slack variables from the other state.
+  *)
+  let meet (a: t) (b: t) = 
+    let (new_a, new_b) = slack_lce a b in
+    match reduce new_a, reduce new_b with 
+    | None, None -> None
+    | None, _ -> None
+    | _, None -> None
+    | Some x, Some y ->
+    (* TODO: do we actually need reduce here? why is it done in the join? *)
+    let new_intervals = 
+      VarMap.union (fun (key : Var.t) (v1 : I.t) (v2 : I.t) -> (I.meet v1 v2)) x.intervals y.intervals in
+    let new_affeq = Matrix.rref_matrix x.affeq y.affeq in
+    match new_affeq with
+    | None -> Some (empty ())
+    | Some new_affeq -> 
+      Some {affeq = new_affeq; intervals = new_intervals; infos = x.infos}
+      (* nach slack_lce sollten die infos gleich sein, desweegn kann man hier einfach das von a verwenden *)
+
 
   let widen = join
-  let narrow (a: t) (_b: t) = a
+  let narrow (a: t) (b: t) = a
   let unify = meet
 
   let _ = Var.string_of (* silence unused-functor-arg warning until Var is actually used *)

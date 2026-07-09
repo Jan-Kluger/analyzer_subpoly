@@ -1,3 +1,36 @@
+## MEET
+# meet in subPolyhedraDomain
+- if one of them is bottom, return the other one
+- else build a common environment and then call the meet function in subPolyhedraCore 
+
+# meet in subPolyhedraCore
+1. when this function is called, we alrready have the same environments for both subpolys
+2. We need to ensure, that the slack variable names are "matching", so that e.g. the slack varibale with the index i occurs either only in one of the subpolys or it is for the same "row" (function: slack_lce)
+    - we do not need to add the slack varibales to the other subpoly if they are not in it yet (so no inject_slack_for_join)
+    - TODO: (slack_lce) find out if the meet should drop intervals that have an interval bound but not an info field (currently slack_lce does this) -> actually i think they dont carry a meaning ful information, so they can be deleted at any point??
+3. 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 ## ASSIGN
 # simplified_monomials_from_texpr
 returns 
