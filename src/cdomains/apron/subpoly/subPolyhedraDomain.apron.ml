@@ -169,7 +169,7 @@ module Slack_managment = struct
         (* Tweak interval *)
         let interval = RationalInterval.scale (Mpqf.one /: mpqf_of_z sign_factor) interval in
         (* the new slack goes at column n+m = the current constant-column index *)
-        let slack_col = Environment.size t.env + SubPolyDomain.num_slacks d in
+        let slack_col = Environment.size t.env + SubPolyDomain.num_slacks d in (*Not sure if this is safe, as there might be a gap no?*)
         { t with d = Some (SubPolyDomain.insert_slack slack_col normalized interval d) }
 end
 
@@ -230,7 +230,24 @@ struct
 
   (* fixpoint iteration handling *)
   (* here we wire up the things from Core *)
-  let meet _a _b = failwith "SubPolyhedraDomain.meet: not implemented" (* do with meet tcons *)
+  
+
+  let meet a b = (* concept copied from the join, just changed a few cases. should be done now *) 
+    if is_bot a then a 
+    else if is_bot b then b
+    else
+      match a.d, b.d with 
+      | None, _ -> b
+      | _, None -> a
+      | Some x, Some y when is_top_env a -> b
+      | Some x, Some y when is_top_env b -> a
+      | Some x, Some y when (Environment.cmp a.env b.env <> 0)->
+        let sup_env = Environment.lce a.env b.env in
+        let a = dim_add (Environment.dimchange a.env sup_env) x in
+        let b = dim_add (Environment.dimchange b.env sup_env) y in 
+        {d = SubPolyDomain.meet a b; env = sup_env}
+      | Some x, Some y when SubPolyDomain.equal x y -> a
+      | Some x, Some y -> {d = SubPolyDomain.meet x y; env = a.env }
 
 (**
 [join a b ] joins two subpolyhedra. It adapts the apron environment so that both share the 
@@ -249,12 +266,28 @@ same indices. Then it calls SubPolyDomain.join on the updated subpolyhedra. Adap
       | Some x, Some y when (Environment.cmp a.env b.env <> 0)->
        let a = dim_add (Environment.dimchange a.env sup_env) x in
        let b = dim_add (Environment.dimchange b.env sup_env) y in 
-       {d = Some (SubPolyDomain.join a  b); env = sup_env}
+       {d = (SubPolyDomain.join a  b); env = sup_env}
       | Some x, Some y when SubPolyDomain.equal x y -> a
-      | Some x, Some y -> {d = Some (SubPolyDomain.join x y); env = a.env }
+      | Some x, Some y -> {d = SubPolyDomain.join x y; env = a.env }
 
 
-  let leq _a _b = failwith "SubPolyhedraDomain.leq: not implemented"
+  let leq a b =
+    let env_comp = Environment.cmp a.env b.env in (* Apron's Environment.cmp has defined return values. *)
+    if env_comp = -2 || env_comp > 0 then
+      (* -2:  environments are not compatible (a variable has different types in the 2 environements *)
+      (* -1: if env1 is a subset of env2,  (OK)  *)
+      (*  0:  if equality,  (OK) *)
+      (* +1: if env1 is a superset of env2, and +2 otherwise (the lce exists and is a strict superset of both) *)
+      false
+    else if is_bot a || is_top_env b then
+      true
+    else if is_bot b || is_top_env a then
+      false
+    else
+      let a_d, b_d = Option.get a.d, Option.get b.d in
+      let a_d' = if env_comp = 0 then a_d else dim_add (Environment.dimchange a.env b.env) a_d in
+      SubPolyDomain.leq a_d' b_d
+  
   let widen _a _b = failwith "SubPolyhedraDomain.widen: not implemented" (* join *)
   let narrow _a _b = failwith "SubPolyhedraDomain.narrow: not implemented" (* meet *)
   let unify _a _b = failwith "SubPolyhedraDomain.unify: not implemented" (* meet *)
