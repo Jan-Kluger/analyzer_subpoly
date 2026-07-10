@@ -541,7 +541,6 @@ module SubPoly (Var : Var) (I : IntervalSig with type bound = Mpqf.t) = struct
             | Some i -> Some i)
         ) a b)
     with Bot -> None
-
    
   let meet (a: t) (b: t) = 
     let (new_a, new_b) = slack_lce a b in
