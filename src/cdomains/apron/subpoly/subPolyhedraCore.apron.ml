@@ -546,7 +546,7 @@ module SubPoly (Var : Var) (I : IntervalSig with type bound = Mpqf.t) = struct
 
 
   let widen = join
-  let narrow (a: t) (b: t) = a
+  let narrow = meet
   let unify = meet
 
   let _ = Var.string_of (* silence unused-functor-arg warning until Var is actually used *)

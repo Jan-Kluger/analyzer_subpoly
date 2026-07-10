@@ -304,7 +304,7 @@ same indices. Then it calls SubPolyDomain.join on the updated subpolyhedra. Adap
       SubPolyDomain.leq a_d' b_d
   
   let widen _a _b = failwith "SubPolyhedraDomain.widen: not implemented" (* join *)
-  let narrow a b = failwith "SubPolyhedraDomain.narrow: not implemented" (* meet *)
+  let narrow = meet
   let unify = meet
 
   (* transfer functions *)
