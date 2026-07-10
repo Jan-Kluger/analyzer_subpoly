@@ -549,6 +549,20 @@ let string_of (t: t) =
       Slack variables with an interval bound but no info field are discarded, as they cannot be matched
       with slack variables from the other state.
   *)
+
+  (** [interval_meet a b] returns the meet of two interval maps. 
+  In case some of the intervals are disjoint, it returns None, indicating that the meet is bottom.
+   *)
+  let interval_meet (a : interval_map) (b : interval_map) : interval_map option = 
+    let exception Bot in
+    try
+      Some (VarMap.union (
+        fun (key : Var.t) (v1 : I.t) (v2 : I.t) -> (match I.meet v1 v2 with
+            | None -> raise Bot
+            | Some i -> Some i)
+        ) a b)
+    with Bot -> None
+   
   let meet (a: t) (b: t) = 
     let (new_a, new_b) = slack_lce a b in
     match reduce new_a, reduce new_b with 
@@ -556,15 +570,14 @@ let string_of (t: t) =
     | None, _ -> None
     | _, None -> None
     | Some x, Some y ->
-    (* TODO: do we actually need reduce here? why is it done in the join? *)
-    let new_intervals = 
-      VarMap.union (fun (key : Var.t) (v1 : I.t) (v2 : I.t) -> (I.meet v1 v2)) x.intervals y.intervals in
-    let new_affeq = Matrix.rref_matrix x.affeq y.affeq in
-    match new_affeq with
-    | None -> Some (empty ())
-    | Some new_affeq -> 
-      Some {affeq = new_affeq; intervals = new_intervals; infos = x.infos}
-      (* nach slack_lce sollten die infos gleich sein, desweegn kann man hier einfach das von a verwenden *)
+      match interval_meet x.intervals y.intervals with
+      | None -> None
+      | Some new_intervals -> 
+        match Matrix.rref_matrix x.affeq y.affeq with (* Matrix ist dann in der richtigen Form *)
+        | None -> None
+        | Some new_affeq -> 
+          let new_infos = VarMap.union (fun _ i1 i2 -> if info_equal i1 i2 then Some i1 else failwith "inconsistent slack mapping") x.infos y.infos in
+          Some {affeq = new_affeq; intervals = new_intervals; infos = new_infos}
 
 
   let widen a b =
@@ -585,7 +598,7 @@ let string_of (t: t) =
     let lost_vars = Array.of_enum @@ VarMap.keys @@ VarMap.filter (fun v _ -> not (VarMap.mem v new_intervals)) y.intervals in
     Some (remove_columns lost_vars {affeq = new_affeq; intervals = new_intervals; infos = x.infos} true)
 
-  let narrow (a: t) (b: t) = a
+  let narrow = meet
   let unify = meet
 
   let _ = Var.string_of (* silence unused-functor-arg warning until Var is actually used *)

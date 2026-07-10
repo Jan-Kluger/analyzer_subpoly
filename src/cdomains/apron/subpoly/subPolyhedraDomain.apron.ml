@@ -326,8 +326,8 @@ same indices. Then it calls SubPolyDomain.widen on the updated subpolyhedra. Ada
       SubPolyDomain.leq a_d' b_d
   
   let widen _a _b = failwith "SubPolyhedraDomain.widen: not implemented" (* join *)
-  let narrow _a _b = failwith "SubPolyhedraDomain.narrow: not implemented" (* meet *)
-  let unify _a _b = failwith "SubPolyhedraDomain.unify: not implemented" (* meet *)
+  let narrow = meet
+  let unify = meet
 
   (* transfer functions *)
 
@@ -385,9 +385,9 @@ same indices. Then it calls SubPolyDomain.widen on the updated subpolyhedra. Ada
             let new_row_vector = SubPolyDomain.CoeffVector.of_sparse_list (CoeffVector.length row) new_row in
             SubPolyDomain.add_affeq_row new_row_vector acc
         )
-        ((SubPolyDomain.empty ())) d.affeq
+        ({d with affeq = SubPolyDomain.Matrix.empty ()}) d.affeq
       in
-      {t with d = Some new_t }
+      {t with d = Some new_t}
 
 
   let assign_texpr (t: VarManagement.t) var texp =
