@@ -118,16 +118,21 @@ module SparseVector: SparseVectorFunctor =
       v.entries
 
     let show v =
-      let rec sparse_list_str i l =
-        if i >= v.len then "]"
+      let pad_str s = Printf.sprintf "%4s" s in
+      let zero_str = pad_str (A.to_string A.zero) in
+      let rec build_elements i entries acc =
+        if i >= v.len then 
+          List.rev acc
         else
-          match l with
-          | [] -> (A.to_string A.zero) ^" "^ (sparse_list_str (i + 1) l)
-          | (idx, value) :: xs ->
-            if i = idx then (A.to_string value) ^" "^ sparse_list_str (i + 1) xs
-            else (A.to_string A.zero) ^" "^ sparse_list_str (i + 1) l
+          match entries with
+          | (idx, value) :: rest when idx = i ->
+            let val_str = pad_str (A.to_string value) in
+            build_elements (i + 1) rest (val_str :: acc)
+          | _ ->
+            build_elements (i + 1) entries (zero_str :: acc)
       in
-      "["^(sparse_list_str 0 v.entries)^"\n"
+      let elements = build_elements 0 v.entries [] in
+      Printf.sprintf "[ %s ]" (String.concat " " elements)
 
     let length v =
       v.len

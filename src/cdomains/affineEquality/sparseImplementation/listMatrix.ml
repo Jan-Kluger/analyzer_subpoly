@@ -46,8 +46,10 @@ module ListMatrix: SparseMatrixFunctor =
     type t = V.t list (* List of rows *)
     [@@deriving eq, ord, hash]
 
-    let show x =
-      List.fold_left (^) "" (List.map (fun x -> (V.show x)) x)
+  let show matrix =
+  matrix
+  |> List.map V.show
+  |> String.concat "\n    "
 
     let copy m = m
 

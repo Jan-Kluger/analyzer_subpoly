@@ -261,22 +261,23 @@ module SubPoly (Var : Var) (I : IntervalSig with type bound = Mpqf.t) = struct
     remove_columns ch.dim t true
 
   let string_of_interval_map (m: interval_map) =
-    VarMap.bindings m
-    |> List.map (fun (var, interval) -> Var.string_of var ^ " -> " ^ I.show interval)
-    |> String.concat "; "
+  VarMap.bindings m
+  |> List.map (fun (var, interval) ->
+      Printf.sprintf "%s -> %s" (Var.string_of var) (I.show interval))
+  |> String.concat ";\n    " 
 
-  let string_of_infos (infos: info_map) = 
-    VarMap.bindings infos
-      |> List.map (fun (var, info) -> Var.string_of var ^ " -> " ^ CoeffVector.show info)
-      |> String.concat "; "
-  
-  let string_of_interval (s: I.t) (i : info)=
-    I.show s ^ "  (" ^ CoeffVector.show i ^ ")"
+let string_of_infos (infos: info_map) = 
+  VarMap.bindings infos
+  |> List.map (fun (var, info) ->
+      Printf.sprintf "%s -> %s" (Var.string_of var) (CoeffVector.show info))
+  |> String.concat ";\n    "
 
-  let string_of (t: t) =
-    "{ affeq = " ^ Matrix.show t.affeq
-    ^ "; intervals = [" ^ string_of_interval_map t.intervals ^ "]"
-    ^ "; slacks = [" ^ string_of_infos t.infos ^ "] }"
+let string_of (t: t) =
+  Printf.sprintf 
+    "{\n  affeq =\n    %s;\n  intervals =\n    [\n    %s\n    ];\n  slacks =\n    [\n    %s\n    ]\n}"
+    (Matrix.show t.affeq)
+    (string_of_interval_map t.intervals)
+    (string_of_infos t.infos)
   
 
   (** Raised internally when the LP built from an abstract state is inconsistent, *)
