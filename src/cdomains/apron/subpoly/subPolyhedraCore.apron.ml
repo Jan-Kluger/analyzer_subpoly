@@ -540,7 +540,7 @@ module SubPoly (Var : Var) (I : IntervalSig with type bound = Mpqf.t) = struct
       VarMap.union (fun (key : Var.t) (v1 : I.t) (v2 : I.t) -> (I.meet v1 v2)) x.intervals y.intervals in
     let new_affeq = Matrix.rref_matrix x.affeq y.affeq in
     match new_affeq with
-    | None -> Some (empty ())
+    | None -> None
     | Some new_affeq -> 
       Some {affeq = new_affeq; intervals = new_intervals; infos = x.infos}
       (* nach slack_lce sollten die infos gleich sein, desweegn kann man hier einfach das von a verwenden *)
