@@ -540,7 +540,7 @@ let string_of (t: t) =
     let processed_a = forget_vars (collect_top_and_non_info {a with affeq = a_affeq}) {a with affeq = a_affeq} in
     let processed_b = forget_vars (collect_top_and_non_info {b with affeq = b_affeq}) {b with affeq = b_affeq} in
     let (a_common, b_common) = slack_lce processed_a processed_b in
-    VarMap.equal (fun v1 v2 -> info_equal v1 v2) a_common.infos b_common.infos (*does CoeffVector.equal derive the correct equality?*)
+    VarMap.for_all (fun v k -> info_equal (VarMap.find v b_common.infos) k) a_common.infos
     && VarMap.for_all (fun k v -> I.leq v (VarMap.find k b_common.intervals)) a_common.intervals
     && Matrix.is_covered_by b_common.affeq a_common.affeq
     
