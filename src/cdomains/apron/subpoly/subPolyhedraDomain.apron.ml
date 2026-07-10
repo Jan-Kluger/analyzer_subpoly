@@ -176,15 +176,24 @@ module Slack_managment = struct
         (* add the constant into the interval*)
         let interval = RationalInterval.add_const (Mpqf.neg const) interval in
         let find_key_on_info map info = Seq.find (fun (_, v) -> SubPolyDomain.info_equal v info) @@ SubPolyDomain.VarMap.to_seq map in
-        match find_key_on_info  d.infos info with 
+        match find_key_on_info  d.infos info with
         | None -> (*There is no slack yet with that info, we insert a new one.*)
           (* the new slack goes at column n+m = the current constant-column index *)
           let slack_col = Environment.size t.env + SubPolyDomain.num_slacks d in (*Not sure if this is safe, as there might be a gap no?*)
+          if M.tracing then M.tracel "subpoly" "add_slack_constraint: insert col=%d info=%s intv=%s"
+              slack_col (String.trim @@ CoeffVector.show info) (RationalInterval.show interval);
           { t with d = Some (SubPolyDomain.insert_slack slack_col info interval d) }
         | Some (k, _) -> (* We already have a slack with that info and update its interval.*)
-          match RationalInterval.meet (SubPolyDomain.VarMap.find k d.intervals) interval with 
-          | None -> bot_env
-          | Some i -> {t with d = Some (SubPolyDomain.set_intv k i d)} 
+          let old_intv = SubPolyDomain.VarMap.find k d.intervals in
+          match RationalInterval.meet old_intv interval with
+          | None ->
+            if M.tracing then M.tracel "subpoly" "add_slack_constraint: update col=%d meet(%s, %s) empty -> bot"
+                k (RationalInterval.show old_intv) (RationalInterval.show interval);
+            bot_env
+          | Some i ->
+            if M.tracing then M.tracel "subpoly" "add_slack_constraint: update col=%d meet(%s, %s) = %s"
+                k (RationalInterval.show old_intv) (RationalInterval.show interval) (RationalInterval.show i);
+            {t with d = Some (SubPolyDomain.set_intv k i d)}
         
 end
 
@@ -264,8 +273,13 @@ struct
       | Some x, Some y when SubPolyDomain.equal x y -> a
       | Some x, Some y -> {d = SubPolyDomain.meet x y; env = a.env }
 
+  let meet a b =
+    let res = meet a b in
+    if M.tracing then M.tracel "subpoly" "meet a: %s b: %s -> %s" (show a) (show b) (show res);
+    res
+
 (**
-[join a b ] joins two subpolyhedra. It adapts the apron environment so that both share the 
+[join a b ] joins two subpolyhedra. It adapts the apron environment so that both share the
 same indices. Then it calls SubPolyDomain.join on the updated subpolyhedra. Adapted from ltve.
 *)
   let join a b =
@@ -307,6 +321,10 @@ same indices. Then it calls SubPolyDomain.widen on the updated subpolyhedra. Ada
       | Some x, Some y when SubPolyDomain.equal x y -> a
       | Some x, Some y -> {d = SubPolyDomain.widen x y; env = a.env }
 
+  let join a b =
+    let res = join a b in
+    if M.tracing then M.tracel "subpoly" "join a: %s b: %s -> %s" (show a) (show b) (show res);
+    res
 
   let leq a b =
     let env_comp = Environment.cmp a.env b.env in (* Apron's Environment.cmp has defined return values. *)
@@ -324,9 +342,14 @@ same indices. Then it calls SubPolyDomain.widen on the updated subpolyhedra. Ada
       let a_d, b_d = Option.get a.d, Option.get b.d in
       let a_d' = if env_comp = 0 then a_d else dim_add (Environment.dimchange a.env b.env) a_d in
       SubPolyDomain.leq a_d' b_d
-  
-  let widen _a _b = failwith "SubPolyhedraDomain.widen: not implemented" (* join *)
-  let narrow _a _b = failwith "SubPolyhedraDomain.narrow: not implemented" (* meet *)
+
+  let leq a b =
+    let res = leq a b in
+    if M.tracing then M.tracel "subpoly" "leq a: %s b: %s -> %b" (show a) (show b) res;
+    res
+
+  (* identity narrowing, like SubPolyDomain.narrow: sound since b leq a holds at narrowing points *)
+  let narrow a _b = a
   let unify _a _b = failwith "SubPolyhedraDomain.unify: not implemented" (* meet *)
 
   (* transfer functions *)
@@ -380,12 +403,19 @@ same indices. Then it calls SubPolyDomain.widen on the updated subpolyhedra. Ada
                   let updated_coeff = existing_coeff +: c in
                   List.map (fun (idx, ec) -> if idx = i then (idx, updated_coeff) else (idx, ec)) acc
                 else (i, c) :: acc
-              ) [] new_row_with_duplicates 
+              ) [] new_row_with_duplicates
             in
+            (* of_sparse_list requires entries sorted by index and no explicit zeros
+               (cancelled coefficients would otherwise stay as (i, 0) entries) *)
+            let new_row = new_row
+                          |> List.filter (fun (_, c) -> not (c =: Mpqf.zero))
+                          |> List.sort (fun (i, _) (j, _) -> Int.compare i j) in
             let new_row_vector = SubPolyDomain.CoeffVector.of_sparse_list (CoeffVector.length row) new_row in
             SubPolyDomain.add_affeq_row new_row_vector acc
         )
-        ((SubPolyDomain.empty ())) d.affeq
+        (* seed with d's intervals/infos: only the matrix is rebuilt by the substitution,
+           the slack bookkeeping must survive (an empty () seed corrupts the state) *)
+        ({ d with SubPolyDomain.affeq = SubPolyDomain.Matrix.empty () }) d.affeq
       in
       {t with d = Some new_t }
 
@@ -395,10 +425,16 @@ same indices. Then it calls SubPolyDomain.widen on the updated subpolyhedra. Ada
     | None -> t
     | Some d ->
       let var_i = Environment.dim_of_var t.env var (* this is the variable we are assigning to *) in
-      begin match get_coeff_vec t texp with 
-        | Some coeffvector when  List.exists (fun (var, _ ) -> var = var_i) (CoeffVector.to_sparse_list coeffvector) -> substitute_expr t var_i coeffvector
-        | Some coeffvector -> add_equation (forget_var t var) var_i coeffvector
-        | _ -> forget_vars t [var] (* all other cases: var := texp, where texp is not of any form we can handle, so we forget var *)
+      begin match get_coeff_vec t texp with
+        | Some coeffvector when  List.exists (fun (var, _ ) -> var = var_i) (CoeffVector.to_sparse_list coeffvector) ->
+          if M.tracing then M.tracel "subpoly" "assign_texpr (substitute): var_%d := %s" var_i (String.trim @@ CoeffVector.show coeffvector);
+          substitute_expr t var_i coeffvector
+        | Some coeffvector ->
+          if M.tracing then M.tracel "subpoly" "assign_texpr (new equation): var_%d := %s" var_i (String.trim @@ CoeffVector.show coeffvector);
+          add_equation (forget_var t var) var_i coeffvector
+        | _ ->
+          if M.tracing then M.tracel "subpoly" "assign_texpr (forget): var_%d := <nonlinear>" var_i;
+          forget_vars t [var] (* all other cases: var := texp, where texp is not of any form we can handle, so we forget var *)
       end
   
   (*< Copy-pasted from ltve >*)
@@ -456,6 +492,20 @@ same indices. Then it calls SubPolyDomain.widen on the updated subpolyhedra. Ada
 
   (* tried to adapt something from LTVE, dont quite get what is, to my understandinf its checking if some expr holds.
     We either have true, go through control flow with new constraint, or false and go with negated? *)
+  (* Bottom detection following the paper: a subpolyhedron is bottom iff after a
+     reduction one of the components is bottom. Contradictions between the affeq and
+     the intervals (e.g. j - k = 0 in the affeq vs. a fresh slack j - k >= 1) are only
+     visible to the reduction, so run it after asserting a constraint. The reduced
+     state is kept: reduce is semantics-preserving and the tightened intervals help
+     later dedup meets. *)
+  let reduce_to_bot (t: t) : t =
+    match t.d with
+    | None -> t
+    | Some d ->
+      match SubPolyDomain.reduce d with
+      | None -> bot_env
+      | Some d' -> { t with d = Some d' }
+
   let meet_tcons _ask (t: t) tcons1 _e _no_ov =
     if is_bot_env t then t
     else
@@ -468,9 +518,8 @@ same indices. Then it calls SubPolyDomain.widen on the updated subpolyhedra. Ada
           | Some c, SUPEQ -> if c <:  Mpqf.zero then bot_env else t
           | Some c, SUP   -> if c <=: Mpqf.zero then bot_env else t
           | Some c, DISEQ -> if c =:  Mpqf.zero then bot_env else t
-          (* expr has variables: record it (inconsistency caught later, at rref) *)
-          | None, EQ            -> { t with d = Some (SubPolyDomain.add_affeq_row v (Option.get t.d)) }
-          | None, (SUPEQ | SUP) -> add_slack_constraint t v (RationalInterval.of_bounds ~lower:(Some Mpqf.zero) ~upper:None)
+          | None, EQ            -> reduce_to_bot { t with d = Some (SubPolyDomain.add_affeq_row v (Option.get t.d)) }
+          | None, (SUPEQ | SUP) -> reduce_to_bot (add_slack_constraint t v (RationalInterval.of_bounds ~lower:(Some Mpqf.zero) ~upper:None))
           | _ -> t (* DISEQ / EQMOD over variables: not representable, give up (sound) *)
         end
 

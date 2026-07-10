@@ -1,4 +1,5 @@
 module Mpqf = SharedFunctions.Mpqf
+module M = Messages
 open Intervalsig
 open OcplibSimplex
 include Batteries
@@ -386,6 +387,12 @@ let string_of (t: t) =
       end
     with Infeasible -> None
 
+  let reduce (t: t) : t option =
+    let res = reduce t in
+    if M.tracing then M.tracel "subpoly" "reduce %s -> %s"
+        (string_of t) (match res with None -> "bot" | Some r -> string_of r);
+    res
+
 
   (**
      [slack_lce a b] takes two subpolyhedra [a] and [b] and maps the slack variables into a common environment based on the info field.
@@ -488,6 +495,8 @@ let string_of (t: t) =
   (**
   [interval_join a b] takes two interval_maps and joins them using [RationalInterval.join].
   QUESTION: How do we represent bottom in the interval domain? 
+  Because we inject slacks before this there can not be a case where an entry is present
+  in one state but not the other.
   *)
   let interval_join (a : interval_map) (b : interval_map) : interval_map = 
     VarMap.union (fun (key : Var.t) (v1 : I.t) (v2 : I.t) -> Some (I.join v1 v2)) a b
@@ -508,6 +517,7 @@ let string_of (t: t) =
     with slack variables from the other state.
   *)
   let join (a: t) (b: t) : t option =
+    if M.tracing then M.tracel "subpoly" "join input\na: %s\nb: %s" (string_of a) (string_of b);
     let (remapped_a, remapped_b) = inject_slack_for_join @@ slack_lce a b in
     let new_a = reduce remapped_a in
     let new_b = reduce remapped_b in
@@ -543,7 +553,29 @@ let string_of (t: t) =
     VarMap.equal (fun v1 v2 -> info_equal v1 v2) a_common.infos b_common.infos (*does CoeffVector.equal derive the correct equality?*)
     && VarMap.for_all (fun k v -> I.leq v (VarMap.find k b_common.intervals)) a_common.intervals
     && Matrix.is_covered_by b_common.affeq a_common.affeq
-    
+
+  (* The cheap check above compares stored intervals without reduction, so it can miss
+     containments the framework requires to hold (leq x (join x y) and
+     leq (join x y) (widen x (join x y))). Only when the cheap check fails, retry:
+     - inject the slacks either side is missing (so shared infos get aligned columns),
+     - reduce a so bounds implied by a's affeq become explicit intervals,
+     - forget (in both) the slacks that do not constrain b (absent or top there):
+       dropping a constraint from a only enlarges it, so this is sound for a leq b.
+     The right operand must stay unreduced (reducing it would only shrink its
+     intervals and never help). *)
+  let leq (a: t) (b: t) =
+    leq a b
+    || (let (a', b') = inject_slack_for_join @@ slack_lce a b in
+        match reduce a' with
+        | None -> true (* a is bottom *)
+        | Some a_reduced ->
+          let dont_constrain_b =
+            VarMap.fold (fun v intv acc ->
+                if (not @@ VarMap.mem v b'.infos) || I.is_top intv then v :: acc else acc)
+              b'.intervals []
+          in
+          leq (forget_vars dont_constrain_b a_reduced) (forget_vars dont_constrain_b b'))
+
   (** [meet a b] returns a subpolyhedra resulting from the meet of two subpolyhedras a and b.
       We assume that the info fields of slack variables are canonical. 
       Slack variables with an interval bound but no info field are discarded, as they cannot be matched
@@ -584,6 +616,12 @@ let string_of (t: t) =
     let new_affeq = Matrix.linear_disjunct x.affeq y.affeq in
     let lost_vars = Array.of_enum @@ VarMap.keys @@ VarMap.filter (fun v _ -> not (VarMap.mem v new_intervals)) y.intervals in
     Some (remove_columns lost_vars {affeq = new_affeq; intervals = new_intervals; infos = x.infos} true)
+
+  let widen a b =
+    let res = widen a b in
+    if M.tracing then M.tracel "subpoly" "widen\na: %s\nb: %s\n-> %s"
+        (string_of a) (string_of b) (match res with None -> "bot" | Some r -> string_of r);
+    res
 
   let narrow (a: t) (b: t) = a
   let unify = meet
