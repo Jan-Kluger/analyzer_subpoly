@@ -191,15 +191,37 @@ end
 module ExpressionBounds: (SharedFunctions.ConvBounds with type t = VarManagement.t) = struct
   include Linexpr_managment
 
-  (* TODO: this only answers for constant expressions (min = max = c). Once the lattice ops are implemented we can get more advanced  *)
-  (* Again inspired by the LTVE and Affeq implementations *)
-  let bound_texpr t texpr =
-    match Option.bind (get_coeff_vec t (Texpr1.to_expr texpr)) to_constant_opt with
-    (* get den just chekcs denominator = 1, if so we have whole number and we just return that as bound, else npothing *)
-    | Some c when Z.equal (Mpqf.get_den c) Z.one ->
-      let n = Mpqf.get_num c in
-      Some n, Some n
-    | _ -> None, None
+  (* reduce solves over Q, but the expression is integer-valued. rounding the upper
+     bound down and the lower bound up *)
+  let z_floor q = Z.fdiv (Mpqf.get_num q) (Mpqf.get_den q)
+  let z_ceil q = Z.cdiv (Mpqf.get_num q) (Mpqf.get_den q)
+
+  (* [None] anywhere in the chain (bot state, non-linear expression, infeasible after
+     reduce) means "no bounds": the caller gets [(None, None)]. *)
+  let bound_texpr (t: t) (texpr : Texpr1.t) : Z.t option * Z.t option =
+    let bounds =
+      (* Get monad *)
+      let open GobOption.Syntax in
+      let* d = t.d in
+      let* v = get_coeff_vec t (Texpr1.to_expr texpr) in
+      match to_constant_opt v with
+      | Some c when Z.equal (Mpqf.get_den c) Z.one ->
+        let n = Mpqf.get_num c in
+        Some (Some n, Some n)
+      | Some _ -> None (* non-integral constant *)
+      | None ->
+
+        (* Give the expression a temporary slack (row s = expr, interval top) and let
+           reduce compute the tightest interval for it. The constant stays inside the
+           row (unlike add_slack_constraint), so s equals the full expression and the
+           refined interval needs no shifting. The temporary state is discarded. *)
+
+        let slack_col = Environment.size t.env + SubPolyDomain.num_slacks d in
+        let* d' = SubPolyDomain.reduce (SubPolyDomain.insert_slack slack_col v RationalInterval.top d) in
+        let lower, upper = RationalInterval.bounds (SubPolyDomain.VarMap.find slack_col d'.intervals) in
+        Some (Option.map z_ceil lower, Option.map z_floor upper)
+    in
+    Option.default (None, None) bounds
 end
 
 module D =
