@@ -535,7 +535,6 @@ module SubPoly (Var : Var) (I : IntervalSig with type bound = Mpqf.t) = struct
     | None, _ -> None
     | _, None -> None
     | Some x, Some y ->
-    (* TODO: do we actually need reduce here? why is it done in the join? *)
     let new_intervals = 
       VarMap.union (fun (key : Var.t) (v1 : I.t) (v2 : I.t) -> (I.meet v1 v2)) x.intervals y.intervals in
     let new_affeq = Matrix.rref_matrix x.affeq y.affeq in
