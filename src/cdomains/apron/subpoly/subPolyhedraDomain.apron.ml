@@ -373,51 +373,58 @@ same indices. Then it calls SubPolyDomain.widen on the updated subpolyhedra. Ada
       let row = CoeffVector.set_nth coeffvector v (Mpqf.neg Mpqf.one) in (* -x zur linexpr hinzufügen; x = linexpr --> 0 = linexpr - x*)
       { t with d = Some (SubPolyDomain.add_affeq_row row d) } 
 
-  let substitute_expr (t: t) (v: int) (coeffvector: CoeffVector.t) = 
+  (** [substitute_expr t v coeffvector] handles the invertible assignment
+      [v := coeffvector] (the vector contains [v] with non-zero coefficient [a]):
+      every occurrence of the old [v] is replaced by its expression in terms of
+      the new [v], i.e. [v_old = (v_new - rest - c)/a].
+      Rows are rewritten in place. Slack infos mentioning [v] are stale after the
+      substitution (the slack's defining row now denotes a different linear form),
+      so they are dropped and their constraint is re-expressed over the new [v]
+      and re-added via [add_slack_constraint]. Keeping a stale info is unsound:
+      later constraints on the same linear form would dedup against a slack that
+      no longer equals it. *)
+  let substitute_expr (t: t) (v: int) (coeffvector: CoeffVector.t) =
     match t.d with
     | None -> t
-    | Some d -> 
-      let terms_and_constant = CoeffVector.to_sparse_list coeffvector in
-      let v_coeff = match List.find_opt (fun (idx, _) -> idx = v) terms_and_constant with | Some (_, coeff) -> coeff | None -> failwith "Variable not found in terms_and_constant" in
-      let substitute_x_by_this = List.fold_left 
-        (fun acc (idx, coeff) -> 
-          if idx = v then (idx, Mpqf.one /: v_coeff) :: acc
-          else (idx, Mpqf.neg (coeff /: v_coeff)) :: acc
-        ) 
-        [] terms_and_constant 
-      in
-      let new_t = SubPolyDomain.Matrix.fold_left
-        (fun acc row ->
-          let row_sparse_list = CoeffVector.to_sparse_list row in
-          match List.find_opt (fun (idx, _) -> idx = v) row_sparse_list with
-          | None -> (* this row does not contain v --> just add this to the new matrix *)
-            let row_vector = SubPolyDomain.CoeffVector.of_sparse_list (CoeffVector.length row) row_sparse_list in
-            SubPolyDomain.add_affeq_row row_vector acc   
-          | Some (idx, coeff) ->  (* this row contains v -> change this row *)
-            let row_without_v = List.filter (fun (idx, _) -> idx <> v) row_sparse_list in
-            let new_row_with_duplicates = List.fold_left (fun acc (i, c) -> (i, coeff *: c)::acc) row_without_v substitute_x_by_this in
-            let new_row = List.fold_left 
-              (fun acc (i, c) ->
-                if List.exists (fun (idx, _) -> idx = i) acc then
-                  let (_, existing_coeff) = List.find (fun (idx, _) -> idx = i) acc in
-                  let updated_coeff = existing_coeff +: c in
-                  List.map (fun (idx, ec) -> if idx = i then (idx, updated_coeff) else (idx, ec)) acc
-                else (i, c) :: acc
-              ) [] new_row_with_duplicates
-            in
-            (* of_sparse_list requires entries sorted by index and no explicit zeros
-               (cancelled coefficients would otherwise stay as (i, 0) entries) *)
-            let new_row = new_row
-                          |> List.filter (fun (_, c) -> not (c =: Mpqf.zero))
-                          |> List.sort (fun (i, _) (j, _) -> Int.compare i j) in
-            let new_row_vector = SubPolyDomain.CoeffVector.of_sparse_list (CoeffVector.length row) new_row in
-            SubPolyDomain.add_affeq_row new_row_vector acc
-        )
-        (* seed with d's intervals/infos: only the matrix is rebuilt by the substitution,
-           the slack bookkeeping must survive (an empty () seed corrupts the state) *)
-        ({ d with SubPolyDomain.affeq = SubPolyDomain.Matrix.empty () }) d.affeq
-      in
-      {t with d = Some new_t }
+    | Some d ->
+      let v_coeff = CoeffVector.nth coeffvector v in
+      if v_coeff =: Mpqf.zero then failwith "substitute_expr: assigned variable not in expression"
+      else
+        (* v_old = (1/a)*v_new - sum_{i<>v} (c_i/a)*x_i - c/a *)
+        let subst_vec =
+          CoeffVector.mapi_f_preserves_zero
+            (fun idx c -> if idx = v then Mpqf.one /: v_coeff else Mpqf.neg (c /: v_coeff))
+            coeffvector
+        in
+        (* replace v's occurrence in [vec] by [subst_vec] scaled with v's coefficient *)
+        let substitute_in vec =
+          let k = CoeffVector.nth vec v in
+          if k =: Mpqf.zero then vec
+          else
+            CoeffVector.map2_f_preserves_zero (fun x s -> x +: k *: s)
+              (CoeffVector.set_nth vec v Mpqf.zero) subst_vec
+        in
+        let new_affeq = SubPolyDomain.Matrix.remove_zero_rows @@ SubPolyDomain.Matrix.map substitute_in d.affeq in
+        let stale, kept = SubPolyDomain.VarMap.partition (fun _ info -> not (CoeffVector.nth info v =: Mpqf.zero)) d.infos in
+        let t = { t with d = Some { d with SubPolyDomain.affeq = new_affeq; infos = kept } } in
+        (* The orphaned slack keeps its interval: its value is unchanged, only its
+           symbolic description moved into the rewritten rows. The re-added
+           constraint [info' in interval] holds because slack = info' (as values). *)
+        SubPolyDomain.VarMap.fold (fun svar info t ->
+            let info' = substitute_in info in
+            match to_constant_opt info', SubPolyDomain.VarMap.find_opt svar d.intervals, t.d with
+            | Some _, _, _ (* form collapsed to a constant: nothing to re-add *)
+            | _, None, _ | _, _, None -> t
+            | None, Some interval, Some d_cur ->
+              (* every re-added constraint may have grown the state by a slack column,
+                 so pad info' (computed at the old width) with zeros before the constant *)
+              let delta = Environment.size t.env + SubPolyDomain.num_slacks d_cur + 1 - CoeffVector.length info' in
+              let info' = if delta = 0 then info'
+                else CoeffVector.insert_zero_at_indices info' [(CoeffVector.length info' - 1, delta)] delta in
+              if M.tracing then M.tracel "subpoly" "substitute_expr: re-adding stale info of col %d as %s in %s"
+                  svar (String.trim @@ CoeffVector.show info') (RationalInterval.show interval);
+              add_slack_constraint t info' interval)
+          stale t
 
 
   let assign_texpr (t: VarManagement.t) var texp =
@@ -518,8 +525,15 @@ same indices. Then it calls SubPolyDomain.widen on the updated subpolyhedra. Ada
           | Some c, SUPEQ -> if c <:  Mpqf.zero then bot_env else t
           | Some c, SUP   -> if c <=: Mpqf.zero then bot_env else t
           | Some c, DISEQ -> if c =:  Mpqf.zero then bot_env else t
-          | None, EQ            -> reduce_to_bot { t with d = Some (SubPolyDomain.add_affeq_row v (Option.get t.d)) }
-          | None, (SUPEQ | SUP) -> reduce_to_bot (add_slack_constraint t v (RationalInterval.of_bounds ~lower:(Some Mpqf.zero) ~upper:None))
+          | None, EQ    -> reduce_to_bot { t with d = Some (SubPolyDomain.add_affeq_row v (Option.get t.d)) }
+          | None, SUPEQ -> reduce_to_bot (add_slack_constraint t v (RationalInterval.of_bounds ~lower:(Some Mpqf.zero) ~upper:None))
+          | None, SUP ->
+            (* over integer variables expr > 0 <=> expr >= 1, provided expr is
+               integer-valued: scale by the lcm of the coefficient denominators
+               (an equivalent constraint) to clear fractions first *)
+            let lcm = List.fold_left (fun acc (_, c) -> Z.lcm acc (Mpqf.get_den c)) Z.one (CoeffVector.to_sparse_list v) in
+            let v = if Z.equal lcm Z.one then v else CoeffVector.map_f_preserves_zero (fun c -> c *: mpqf_of_z lcm) v in
+            reduce_to_bot (add_slack_constraint t v (RationalInterval.of_bounds ~lower:(Some Mpqf.one) ~upper:None))
           | _ -> t (* DISEQ / EQMOD over variables: not representable, give up (sound) *)
         end
 

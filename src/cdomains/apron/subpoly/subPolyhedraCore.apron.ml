@@ -457,7 +457,17 @@ let string_of (t: t) =
     let a_with_slacks_removed = forget_vars (VarMap.fold (fun var _ acc -> if not @@ VarMap.mem var a.infos then var :: acc else acc) a.intervals []) a in 
     let b_with_slacks_removed = forget_vars (VarMap.fold (fun var _ acc -> if not @@ VarMap.mem var b.infos then var :: acc else acc) b.intervals []) b in 
     let (a_mapping, b_mapping) = get_mapping a_with_slacks_removed b_with_slacks_removed in
-    let len = (find_next_slack_idx (a_mapping, b_mapping)) + 1 in
+    (* Common vector width. With slacks this is the highest mapped slack column + 2
+       (slack columns are contiguous, the constant sits behind them). Without any
+       slacks [find_next_slack_idx] would answer 0 and rows would be remapped into
+       length-1 vectors, so use the operands' actual width instead (program vars +
+       constant); if neither has a row, nothing gets remapped and the value is moot. *)
+    let len =
+      if IntMap.is_empty a_mapping && IntMap.is_empty b_mapping then
+        if not (Matrix.is_empty a_with_slacks_removed.affeq) then Matrix.num_cols a_with_slacks_removed.affeq
+        else if not (Matrix.is_empty b_with_slacks_removed.affeq) then Matrix.num_cols b_with_slacks_removed.affeq
+        else 1
+      else (find_next_slack_idx (a_mapping, b_mapping)) + 1 in
     let a_remapped = remap_slacks a_with_slacks_removed a_mapping len in
     let b_remapped = remap_slacks b_with_slacks_removed b_mapping len in
     (a_remapped, b_remapped)
@@ -564,39 +574,58 @@ let string_of (t: t) =
      The right operand must stay unreduced (reducing it would only shrink its
      intervals and never help). *)
   let leq (a: t) (b: t) =
-    leq a b
-    || (let (a', b') = inject_slack_for_join @@ slack_lce a b in
-        match reduce a' with
-        | None -> true (* a is bottom *)
-        | Some a_reduced ->
-          let dont_constrain_b =
-            VarMap.fold (fun v intv acc ->
-                if (not @@ VarMap.mem v b'.infos) || I.is_top intv then v :: acc else acc)
-              b'.intervals []
-          in
-          leq (forget_vars dont_constrain_b a_reduced) (forget_vars dont_constrain_b b'))
+    (* Both the cheap check and the fallback drop b's orphan slacks (interval but
+       no info) on the way through forget_vars/slack_lce. Dropping constraints from
+       the RIGHT operand enlarges it — the unsound direction for leq. If such an
+       orphan is still linked to other variables through b's matrix (e.g. s - y = 0
+       left over from eliminating x out of {s = x, y = x}), answer false
+       conservatively; an orphan whose column is gone from the matrix constrains
+       nothing but itself and is safe to drop. *)
+    let b_orphan_constrains =
+      VarMap.exists (fun var intv ->
+          (not @@ VarMap.mem var b.infos) && (not @@ I.is_top intv)
+          && Matrix.fold_left (fun occurs row -> occurs || CoeffVector.nth row var <>: Mpqf.zero) false b.affeq)
+        b.intervals
+    in
+    if b_orphan_constrains then
+      Option.is_none (Matrix.normalize a.affeq) (* only a definitely-bottom a is below everything *)
+    else
+      leq a b
+      || (let (a', b') = inject_slack_for_join @@ slack_lce a b in
+          match reduce a' with
+          | None -> true (* a is bottom *)
+          | Some a_reduced ->
+            let dont_constrain_b =
+              VarMap.fold (fun v intv acc ->
+                  if (not @@ VarMap.mem v b'.infos) || I.is_top intv then v :: acc else acc)
+                b'.intervals []
+            in
+            leq (forget_vars dont_constrain_b a_reduced) (forget_vars dont_constrain_b b'))
 
   (** [meet a b] returns a subpolyhedra resulting from the meet of two subpolyhedras a and b.
-      We assume that the info fields of slack variables are canonical. 
-      Slack variables with an interval bound but no info field are discarded, as they cannot be matched
-      with slack variables from the other state.
+      We assume that the info fields of slack variables are canonical.
+      Slacks are injected into the side missing them (sound: a fresh existential column
+      with its defining row does not change the concretization), so both operands carry
+      the same infos and slack constraints from either side survive the meet.
   *)
-  let meet (a: t) (b: t) = 
-    let (new_a, new_b) = slack_lce a b in
-    match reduce new_a, reduce new_b with 
-    | None, None -> None
-    | None, _ -> None
-    | _, None -> None
+  let meet (a: t) (b: t) =
+    let (new_a, new_b) = inject_slack_for_join @@ slack_lce a b in
+    match reduce new_a, reduce new_b with
+    | None, _ | _, None -> None
     | Some x, Some y ->
-    (* TODO: do we actually need reduce here? why is it done in the join? *)
-    let new_intervals = 
-      VarMap.union (fun (key : Var.t) (v1 : I.t) (v2 : I.t) -> (I.meet v1 v2)) x.intervals y.intervals in
-    let new_affeq = Matrix.rref_matrix x.affeq y.affeq in
-    match new_affeq with
-    | None -> Some (empty ())
-    | Some new_affeq -> 
-      Some {affeq = new_affeq; intervals = new_intervals; infos = x.infos}
-      (* nach slack_lce sollten die infos gleich sein, desweegn kann man hier einfach das von a verwenden *)
+    match Matrix.rref_matrix x.affeq y.affeq with
+    | None -> None (* contradictory equalities: the meet is bottom *)
+    | Some new_affeq ->
+      (* pairwise interval meet; an empty intersection on any slack means bottom *)
+      let exception Bottom in
+      match
+        VarMap.union (fun (_ : Var.t) (v1 : I.t) (v2 : I.t) ->
+            match I.meet v1 v2 with
+            | None -> raise Bottom
+            | Some v -> Some v) x.intervals y.intervals
+      with
+      | new_intervals -> Some {affeq = new_affeq; intervals = new_intervals; infos = x.infos}
+      | exception Bottom -> None
 
 
   let widen a b =

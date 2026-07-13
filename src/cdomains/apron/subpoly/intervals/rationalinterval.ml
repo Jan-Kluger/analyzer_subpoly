@@ -13,13 +13,19 @@ module RationalInterval : Intervalsig.IntervalSig with type bound = Mpqf.t = str
     | (Some l1, Some u1), (Some l2, Some u2) -> Mpqf.equal l1 l2 && Mpqf.equal u1 u2
     | _ -> false
 
-  let compare ((l1, u1) as interval_1 : t) ((l2, u2) as interval_2 : t) =
-    match interval_1, interval_2 with
-    | (None, None), (None, None) -> 0
-    | (Some l1, Some u1), (Some l2, Some u2) ->
-      let c_lower = Mpqf.compare l1 l2 in
-      if c_lower <> 0 then c_lower else Mpqf.compare u1 u2
-    | _ -> 1
+  (* compare must be a total order consistent with equal (it is used by derived
+     ord up to the domain state, e.g. in path-sensitivity sets): None is -inf in
+     the lower position and +inf in the upper position. *)
+  let compare_bound_opt (none_is_neg_inf : bool) (a : Mpqf.t option) (b : Mpqf.t option) =
+    match a, b with
+    | None, None -> 0
+    | None, Some _ -> if none_is_neg_inf then -1 else 1
+    | Some _, None -> if none_is_neg_inf then 1 else -1
+    | Some a, Some b -> Mpqf.compare a b
+
+  let compare ((l1, u1) : t) ((l2, u2) : t) =
+    let c_lower = compare_bound_opt true l1 l2 in
+    if c_lower <> 0 then c_lower else compare_bound_opt false u1 u2
 
   let hash ((l, u) : t) =
     Hashtbl.hash (Option.map Mpqf.hash l, Option.map Mpqf.hash u)
