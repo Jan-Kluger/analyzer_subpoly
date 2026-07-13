@@ -1,5 +1,5 @@
-// SKIP PARAM: --set ana.activated[+] subpoly --set sem.int.signed_overflow
-// assume_none NOCRASH
+// SKIP PARAM: --set ana.activated[+] subpoly --set sem.int.signed_overflow assume_none
+// NOCRASH
 
 #include <goblint.h>
 
