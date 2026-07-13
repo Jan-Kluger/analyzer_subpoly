@@ -322,8 +322,8 @@ let string_of (t: t) =
   (** [optimize env col coeff] is the optimum of [coeff * v_col]: [Some m] is the exact
       maximum, [None] means unbounded. A strict optimum [m - eps] is reported with value
       [m], which is still a sound bound. Raises [Infeasible] on an inconsistent system. *)
-  let optimize (env: Core.t) (col: LpVar.t) (coeff: Mpqf.t) : Core.t * Mpqf.t option =
-    let env, opt = Solve.maximize env (Core.P.from_list [(col, coeff)]) in
+  let optimize (env: Core.t) (terms : (int * Mpqf.t) list) : Core.t * Mpqf.t option =
+    let env, opt = Solve.maximize env (Core.P.from_list terms) in
     match Result.get opt env with
     | Core.Max (mx, _) -> env, Some (Lazy.force mx).Core.max_v.Core.bvalue.Core.R2.v
     | Core.Unbounded _ -> env, None
@@ -337,8 +337,8 @@ let string_of (t: t) =
     let col = Var.to_int var in
 
     (* optimze to get upper and lower *)
-    let env, upper = optimize env col Mpqf.one in
-    let env, neg_lower = optimize env col Mpqf.mone in
+    let env, upper = optimize env [(col, Mpqf.one)] in
+    let env, neg_lower = optimize env [(col, Mpqf.mone)] in
 
     (* revert negation trick *)
     let lower = Option.map Mpqf.neg neg_lower in
@@ -347,6 +347,22 @@ let string_of (t: t) =
     match I.meet intv (I.of_bounds ~lower ~upper) with
     | None -> raise Infeasible
     | Some intv' -> (env, VarMap.add var intv' acc)
+
+
+  let lp_of (t : t) : Core.t option = 
+    try
+      let env = Core.empty ~is_int:false ~check_invs:false in
+
+      (* Add rows and intervals *)
+      let env, _ = Matrix.fold_left assert_row (env, 0) t.affeq in
+      let env = VarMap.fold assert_interval t.intervals env in
+
+      (* Feasibility check up front: bottom must be detected even when [t.intervals] is
+         empty and the refine fold below consequently never queries the solver. *)
+      match Result.get None (Solve.solve env) with
+      | Core.Unsat _ -> None
+      | _ -> Some env
+    with Infeasible -> None
 
   (** [reduce t] is the LP-based redu
       after normalizing the matrix (rref), for every variable with an interval it computes, via simplex, 
@@ -366,20 +382,9 @@ let string_of (t: t) =
         | Some mat ->
           (* T is now normalized matrix *)
           let t = { t with affeq = mat } in
-
-          (* Make new simplex instance *)
-          let env = Core.empty ~is_int:false ~check_invs:false in
-
-          (* Add rows and intervals *)
-          let env, _ = Matrix.fold_left assert_row (env, 0) t.affeq in
-          let env = VarMap.fold assert_interval t.intervals env in
-
-          (* Feasibility check up front: bottom must be detected even when [t.intervals] is
-             empty and the refine fold below consequently never queries the solver. *)
-          (match Result.get None (Solve.solve env) with
-           | Core.Unsat _ -> raise Infeasible
-           | _ -> ());
-
+          match lp_of t with
+          | None -> None
+          | Some env ->
           (* Update the domain if we are feasable.*)
           let _, new_intervals = VarMap.fold refine_interval t.intervals (env, VarMap.empty) in
           Some { t with intervals = new_intervals }
@@ -521,28 +526,62 @@ let string_of (t: t) =
     let new_affeq = Matrix.linear_disjunct x.affeq y.affeq in
     Some {affeq = new_affeq; intervals = new_intervals; infos = x.infos}
 
+  let recover_def_from_non_info_intv (var : int) (subpoly : t) : info option=
+    let only_prog_vars v  = List.for_all (fun (idx, _) -> (not @@ (VarMap.mem idx subpoly.intervals)) || (idx = var)) (CoeffVector.to_sparse_list v) in
+    match Matrix.find_opt (fun vec -> ((CoeffVector.nth vec var) <>: Mpqf.zero) && only_prog_vars vec) subpoly.affeq with 
+    | None -> None
+    | Some vec ->
+      let coeff = CoeffVector.nth vec var in
+      Some (CoeffVector.map (fun (i, c) -> (i, Mpqf.neg (c /: coeff))) (CoeffVector.set_nth vec var Mpqf.zero))
+  
+  let non_info_entailment a b (non_info : int list) =
+    if List.is_empty non_info then true else 
+    match lp_of a with 
+    | None -> true (*a is bottom and therefore leq to b.*)
+    | Some env -> 
+      List.for_all (fun orph ->
+        match recover_def_from_non_info_intv orph b with 
+        | None -> false 
+        | Some info -> 
+          let info_const = CoeffVector.nth info (CoeffVector.length info - 1) in
+          let info_terms = CoeffVector.to_sparse_list (CoeffVector.set_nth info (CoeffVector.length info - 1) Mpqf.zero) in
+          let upper = optimize env info_terms |> snd |> Option.map (fun m -> m +: info_const) in
+          let lower = optimize env (List.map (fun (i, c) -> (i, Mpqf.neg c)) info_terms) |> snd |> Option.map (fun m -> info_const -: m) in
+          I.leq (I.of_bounds ~lower ~upper) (VarMap.find orph b.intervals)) non_info
   (**
   [leq a b]
-  TODO: Reduce here will be called for every program point because leq is called a lot! 
-        Maybe keep a reduced version at all times!
   TODO: Matrix needs to be in rref!
   *)
   let leq (a: t) (b: t) =
-    let collect_top_and_non_info (x : t) = 
+    let collect_top(x : t) = 
       VarMap.fold (fun var intv acc -> 
-          if (not @@ VarMap.mem var x.infos) || I.is_top intv 
+          if I.is_top intv 
           then var :: acc 
           else acc ) x.intervals []
     in
-    match Matrix.normalize a.affeq, Matrix.normalize b.affeq with 
+    let collect_non_info (x : t) = 
+      VarMap.fold (fun var intv acc ->
+          if (not @@ VarMap.mem var x.infos) && not (I.is_top intv)
+          then var :: acc
+          else acc) x.intervals []
+    in
+    match reduce a, reduce b with (*reduce here needed unfortunately. Invalid widen otherwise.*)
     | None, _ -> true
     | _, None -> false
-    | Some a_affeq, Some b_affeq ->
-    let processed_a = forget_vars (collect_top_and_non_info {a with affeq = a_affeq}) {a with affeq = a_affeq} in
-    let processed_b = forget_vars (collect_top_and_non_info {b with affeq = b_affeq}) {b with affeq = b_affeq} in
+    | Some a, Some b ->
+    let processed_a = forget_vars (collect_top a @ collect_non_info a) a in
+    let b_non_info = collect_non_info b in
+    if not @@ non_info_entailment a b b_non_info then false else
+    let processed_b = forget_vars (collect_top b @ b_non_info) b in
     let (a_common, b_common) = slack_lce processed_a processed_b in
-    VarMap.for_all (fun v k -> info_equal (VarMap.find v b_common.infos) k) a_common.infos
-    && VarMap.for_all (fun k v -> I.leq v (VarMap.find k b_common.intervals)) a_common.intervals
+    VarMap.for_all (fun v k -> 
+      match VarMap.find_opt v b_common.infos with 
+      | Some k' -> info_equal k' k
+      | None -> false) a_common.infos
+    && VarMap.for_all (fun k v -> 
+      match VarMap.find_opt k b_common.intervals with 
+      | Some v' -> I.leq v v'
+      | None -> false) a_common.intervals
     && Matrix.is_covered_by b_common.affeq a_common.affeq
     
   (** [meet a b] returns a subpolyhedra resulting from the meet of two subpolyhedras a and b.
