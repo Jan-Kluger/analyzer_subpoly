@@ -372,45 +372,32 @@ same indices. Then it calls SubPolyDomain.widen on the updated subpolyhedra. Ada
       let row = CoeffVector.set_nth coeffvector v (Mpqf.neg Mpqf.one) in (* -x zur linexpr hinzufügen; x = linexpr --> 0 = linexpr - x*)
       { t with d = Some (SubPolyDomain.add_affeq_row row d) } 
 
-  let substitute_expr (t: t) (v: int) (coeffvector: CoeffVector.t) = 
+  (** [substitute_expr t assigned_dim rhs] is the transfer function for the invertible
+      assignment [x := rhs] where [x] is the variable at column [assigned_dim] and
+      occurs in [rhs] with nonzero coefficient. *)
+  let substitute_expr (t: t) (assigned_dim: int) (rhs: linexpr) =
     match t.d with
     | None -> t
-    | Some d -> 
-      let terms_and_constant = CoeffVector.to_sparse_list coeffvector in
-      let v_coeff = match List.find_opt (fun (idx, _) -> idx = v) terms_and_constant with | Some (_, coeff) -> coeff | None -> failwith "Variable not found in terms_and_constant" in
-      let substitute_x_by_this = List.fold_left 
-        (fun acc (idx, coeff) -> 
-          if idx = v then (idx, Mpqf.one /: v_coeff) :: acc
-          else (idx, Mpqf.neg (coeff /: v_coeff)) :: acc
-        ) 
-        [] terms_and_constant 
-      in
-      let new_t = SubPolyDomain.Matrix.fold_left
-        (fun acc row ->
-          let row_sparse_list = CoeffVector.to_sparse_list row in
-          match List.find_opt (fun (idx, _) -> idx = v) row_sparse_list with
-          | None -> (* this row does not contain v --> just add this to the new matrix *)
-            let row_vector = SubPolyDomain.CoeffVector.of_sparse_list (CoeffVector.length row) row_sparse_list in
-            SubPolyDomain.add_affeq_row row_vector acc   
-          | Some (idx, coeff) ->  (* this row contains v -> change this row *)
-            let row_without_v = List.filter (fun (idx, _) -> idx <> v) row_sparse_list in
-            let new_row_with_duplicates = List.fold_left (fun acc (i, c) -> (i, coeff *: c)::acc) row_without_v substitute_x_by_this in
-            let new_row = List.fold_left 
-              (fun acc (i, c) ->
-                if List.exists (fun (idx, _) -> idx = i) acc then
-                  let (_, existing_coeff) = List.find (fun (idx, _) -> idx = i) acc in
-                  let updated_coeff = existing_coeff +: c in
-                  List.map (fun (idx, ec) -> if idx = i then (idx, updated_coeff) else (idx, ec)) acc
-                else (i, c) :: acc
-              ) [] new_row_with_duplicates 
-            in
-            let new_row_vector = SubPolyDomain.CoeffVector.of_sparse_list (CoeffVector.length row) new_row in
-            SubPolyDomain.add_affeq_row new_row_vector acc
+    | Some d ->
+      match CoeffVector.nth rhs assigned_dim with
+      | assigned_coeff when assigned_coeff = Mpqf.zero -> failwith "substitute_expr: assigned variable not in expression" 
+      | assigned_coeff ->
+        let substitute_x_by_this = 
+          CoeffVector.mapi_f_preserves_zero
+            (fun idx coeff ->
+              if idx = assigned_dim then Mpqf.one /: assigned_coeff 
+              else Mpqf.neg (coeff /: assigned_coeff)
+            ) rhs in
+        
+        let substitute_in = (fun vec ->
+          match CoeffVector.nth vec assigned_dim with
+          | coef when coef = Mpqf.zero -> vec
+          | coef ->
+            let zero_vec = (CoeffVector.set_nth vec assigned_dim Mpqf.zero) in
+            CoeffVector.map2_f_preserves_zero (fun x s -> x +: coef *: s)  zero_vec substitute_x_by_this
         )
-        ({d with affeq = SubPolyDomain.Matrix.empty ()}) d.affeq
-      in
-      {t with d = Some new_t}
-
+        in
+      { t with d = Some { d with affeq = SubPolyDomain.Matrix.map substitute_in d.affeq } }
 
   let assign_texpr (t: VarManagement.t) var texp =
     match t.d with
