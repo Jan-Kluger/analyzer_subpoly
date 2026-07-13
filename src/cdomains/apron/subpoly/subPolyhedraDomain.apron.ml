@@ -73,21 +73,23 @@ module Linexpr_managment = struct
     (* an all-zero vector has gcd 0, so fall back to 1 to make dividing a no-op *)
     if Z.equal gcd Z.zero then Z.one else gcd
 
-  (** [normalize_info v] takes a. linear expression, calculates gcd, then proceeds
-      to normalize expression with gcd and sign normalization. 
-      Returns ([normalized_expr] * [factor])*)
-  let normalize_info (v: linexpr) : linexpr * Z.t =
+  (** [lcm_den_list v] lcm of the denominators of every stored coefficient. *)
+  let lcm_den_list (v: linexpr) : Z.t =
+    CoeffVector.to_sparse_list v
+    |> List.fold_left (fun acc (_, c) -> Z.lcm acc (Mpqf.get_den c)) Z.one
+
+  let normalize_info (v: linexpr) : linexpr * Mpqf.t =
     let gcd = gcd_list v in
+    let lcm = lcm_den_list v in
     (* sign normalization, flip so the leading (lowest-index) coefficient is positive *)
     let sign = match CoeffVector.find_first_non_zero v with
-      | Some (_, leading) when leading <: Mpqf.zero -> Z.minus_one
-      | _ -> Z.one
+      | Some (_, leading) when leading <: Mpqf.zero -> Mpqf.mone
+      | _ -> Mpqf.one
     in
-    (* the factor we divide out carries both the magnitude (gcd) and the sign *)
-    let sign_factor = Z.mul sign gcd in
-    let factor_mpqf = mpqf_of_z sign_factor in
+    (* the factor we divide out carries both the magnitude (the content gcd/lcm) and the sign *)
+    let factor = sign *: mpqf_of_z gcd /: mpqf_of_z lcm in
     (* divide every (non-zero) coefficient, zeros are left untouched *)
-    CoeffVector.map_f_preserves_zero (fun c -> c /: factor_mpqf) v, sign_factor
+    CoeffVector.map_f_preserves_zero (fun c -> c /: factor) v, factor
 
   let negate v = CoeffVector.map_f_preserves_zero Mpqf.neg v
 
@@ -166,13 +168,13 @@ module Slack_managment = struct
       | None -> t
       | Some d ->
         (* normalize expr and then insert when adding slacks *)
-        let normalized, sign_factor = normalize_info linexpr in
+        let normalized, factor = normalize_info linexpr in
         (*get normalized const*)
         let const = CoeffVector.nth normalized ((CoeffVector.length normalized) - 1) in
         (*Strip constant of info*)
         let info = CoeffVector.set_nth normalized ((CoeffVector.length normalized) - 1) Mpqf.zero in
         (* Tweak interval *)
-        let interval = RationalInterval.scale (Mpqf.one /: mpqf_of_z sign_factor) interval in
+        let interval = RationalInterval.scale (Mpqf.one /: factor) interval in
         (* add the constant into the interval*)
         let interval = RationalInterval.add_const (Mpqf.neg const) interval in
         let find_key_on_info map info = Seq.find (fun (_, v) -> SubPolyDomain.info_equal v info) @@ SubPolyDomain.VarMap.to_seq map in
@@ -374,12 +376,12 @@ same indices. Then it calls SubPolyDomain.widen on the updated subpolyhedra. Ada
   (** [substitute_expr t assigned_dim rhs] is the transfer function for the invertible
       assignment [x := rhs] where [x] is the variable at column [assigned_dim] and
       occurs in [rhs] with nonzero coefficient. *)
-  let substitute_expr (t: t) (assigned_dim: int) (rhs: linexpr) =
+  let substitute_expr (t: t) (assigned_dim: int) (rhs: linexpr) : t =
     match t.d with
     | None -> t
     | Some d ->
       match CoeffVector.nth rhs assigned_dim with
-      | assigned_coeff when assigned_coeff = Mpqf.zero -> failwith "substitute_expr: assigned variable not in expression" 
+      | assigned_coeff when assigned_coeff =: Mpqf.zero -> failwith "substitute_expr: assigned variable not in expression"
       | assigned_coeff ->
         let substitute_x_by_this = 
           CoeffVector.mapi_f_preserves_zero
@@ -390,13 +392,35 @@ same indices. Then it calls SubPolyDomain.widen on the updated subpolyhedra. Ada
         
         let substitute_in = (fun vec ->
           match CoeffVector.nth vec assigned_dim with
-          | coef when coef = Mpqf.zero -> vec
+          | coef when coef =: Mpqf.zero -> vec
           | coef ->
             let zero_vec = (CoeffVector.set_nth vec assigned_dim Mpqf.zero) in
             CoeffVector.map2_f_preserves_zero (fun x s -> x +: coef *: s)  zero_vec substitute_x_by_this
         )
         in
-      { t with d = Some { d with affeq = SubPolyDomain.Matrix.map substitute_in d.affeq } }
+        (* infos mentioning the assigned var go stale: the slack keeps its column and
+           interval (its value is unchanged), but the symbolic description is dropped
+           and the substituted definition is re-asserted via add_slack_constraint,
+           which re-canonicalizes *)
+        let stale, kept = SubPolyDomain.VarMap.partition (fun _ info -> not (CoeffVector.nth info assigned_dim =: Mpqf.zero)) d.infos in
+
+        (* Make enw domain with kept infos *)
+        let t = { t with d = Some { d with affeq = SubPolyDomain.Matrix.map substitute_in d.affeq; infos = kept } } in
+        
+        (* Now add new intervals. Walk over stale intervals, and re add, this is the value to return *)
+        SubPolyDomain.VarMap.fold (fun svar info t ->
+            match SubPolyDomain.VarMap.find_opt svar d.intervals, t.d with
+            | None, _ | _, None -> t
+            | Some interval, Some d_cur ->
+              let info' = substitute_in info in
+              (* each re-add may grow the state by a slack column, so pad info'
+                 (computed at the old width) with zeros before the constant *)
+
+              (* Resize to fit *)
+              let delta = Environment.size t.env + SubPolyDomain.num_slacks d_cur + 1 - CoeffVector.length info' in
+              let info' = if delta = 0 then info'
+                else CoeffVector.insert_zero_at_indices info' [(CoeffVector.length info' - 1, delta)] delta in
+              add_slack_constraint t info' interval) stale t
 
   let assign_texpr (t: VarManagement.t) var texp =
     match t.d with
@@ -462,6 +486,15 @@ same indices. Then it calls SubPolyDomain.widen on the updated subpolyhedra. Ada
   (*< Copy-pasted from ltve >*)
   let cil_exp_of_lincons1 = Convert.cil_exp_of_lincons1
 
+(* reduce in meet tcons *)
+  let reduce_to_bot (t: t) : t =
+    match t.d with
+    | None -> t
+    | Some d ->
+      match SubPolyDomain.reduce d with
+      | None -> bot_env
+      | Some d' -> { t with d = Some d' }
+
   (* tried to adapt something from LTVE, dont quite get what is, to my understandinf its checking if some expr holds.
     We either have true, go through control flow with new constraint, or false and go with negated? *)
   let meet_tcons _ask (t: t) tcons1 _e _no_ov =
@@ -477,8 +510,18 @@ same indices. Then it calls SubPolyDomain.widen on the updated subpolyhedra. Ada
           | Some c, SUP   -> if c <=: Mpqf.zero then bot_env else t
           | Some c, DISEQ -> if c =:  Mpqf.zero then bot_env else t
           (* expr has variables: record it (inconsistency caught later, at rref) *)
-          | None, EQ            -> { t with d = Some (SubPolyDomain.add_affeq_row v (Option.get t.d)) }
-          | None, (SUPEQ | SUP) -> add_slack_constraint t v (RationalInterval.of_bounds ~lower:(Some Mpqf.zero) ~upper:None)
+          | None, EQ            -> reduce_to_bot { t with d = Some (SubPolyDomain.add_affeq_row v (Option.get t.d)) }
+          | None, SUPEQ -> reduce_to_bot @@ add_slack_constraint t v (RationalInterval.of_bounds ~lower:(Some Mpqf.zero) ~upper:None)
+          | None, SUP ->
+            (* over integer variables expr > 0 <=> expr >= 1, provided expr is
+               integer-valued: scale by the lcm of the coefficient denominators
+               (an equivalent constraint) to clear fractions first *)
+            let lcm = List.fold_left (fun acc (_, c) -> 
+              Z.lcm acc (Mpqf.get_den c)
+              ) Z.one (CoeffVector.to_sparse_list v) 
+            in
+            let v = if Z.equal lcm Z.one then v else CoeffVector.map_f_preserves_zero (fun c -> c *: mpqf_of_z lcm) v in
+            reduce_to_bot (add_slack_constraint t v (RationalInterval.of_bounds ~lower:(Some Mpqf.one) ~upper:None))
           | _ -> t (* DISEQ / EQMOD over variables: not representable, give up (sound) *)
         end
 
