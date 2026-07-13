@@ -568,13 +568,13 @@ let string_of (t: t) =
     match Matrix.normalize new_a.affeq, Matrix.normalize new_b.affeq with 
     | None, _  | _, None -> None
     | Some x, Some y ->
-      match interval_meet a.intervals b.intervals with
+      match interval_meet new_a.intervals new_b.intervals with
       | None -> None
       | Some new_intervals -> 
         match Matrix.rref_matrix x y with (* Matrix ist dann in der richtigen Form *)
         | None -> None
         | Some new_affeq -> 
-          let new_infos = VarMap.union (fun _ i1 i2 -> if info_equal i1 i2 then Some i1 else failwith "inconsistent slack mapping") a.infos b.infos in
+          let new_infos = VarMap.union (fun _ i1 i2 -> if info_equal i1 i2 then Some i1 else failwith "inconsistent slack mapping") new_a.infos new_b.infos in
           Some {affeq = new_affeq; intervals = new_intervals; infos = new_infos}
 
 
