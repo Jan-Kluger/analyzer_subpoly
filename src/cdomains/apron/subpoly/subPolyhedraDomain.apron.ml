@@ -10,7 +10,9 @@
     from their normalized linear form, so the same constraint template maps to
     the same dimension in every state. Reduction between the two components is
     performed by interval propagation through the equality rows (a cheap, sound
-    approximation of the Simplex-based reduction of the paper).
+    approximation of the Simplex-based reduction of the paper), optionally
+    strengthened by basis exploration with the linear explorer (rho_BE with
+    delta_L of the paper) when [ana.subpoly.basis-exploration] is enabled.
 
     @see <https://www.microsoft.com/en-us/research/wp-content/uploads/2011/06/subpolyhedra.pdf>  Subpolyhedra. *)
 
@@ -44,6 +46,18 @@ struct
   let dim_add = SubPolyDomain.dim_add
 
   let size t = Environment.size t.env
+
+  (** Whether reduction additionally explores bases with the linear explorer
+      (rho_BE with delta_L of the paper). The config may be unavailable (e.g.
+      in unit tests, which call the core directly instead); treat that as
+      disabled. *)
+  let basis_exploration_enabled =
+    lazy (try GobConfig.get_bool "ana.subpoly.basis-exploration" with _ -> false)
+
+  (** Reduction between the equality and interval components: fixpoint
+      interval propagation, plus basis exploration when enabled. *)
+  let reduce ~size (d: SubPolyDomain.t) =
+    P.reduce ~size ~explore:(Lazy.force basis_exploration_enabled) d
 
   (* ---------------------------------------------------------------------- *)
   (* Slack variables.
@@ -151,7 +165,7 @@ struct
       | None -> (None, None)
       | Some v ->
         let sz = size t in
-        match P.propagate ~size:sz d with
+        match reduce ~size:sz d with
         | None -> (None, None)
         | Some refined ->
           let iv = P.eval_vec ~size:sz d refined v in
@@ -239,7 +253,7 @@ struct
     match t.d with
     | None -> t
     | Some d ->
-      if Option.is_none (P.propagate ~size:(size t) d) then bot_env else t
+      if Option.is_none (reduce ~size:(size t) d) then bot_env else t
 
   (** Reduction: materializes the interval refinement implied by the equality
       rows into the state, so the information survives the projection of the
@@ -248,7 +262,7 @@ struct
     match t.d with
     | None -> t
     | Some d ->
-      match P.propagate ~size:(size t) d with
+      match reduce ~size:(size t) d with
       | None -> bot_env
       | Some m -> { t with d = Some { d with P.intervals = m } }
 
@@ -620,7 +634,7 @@ struct
       match P.saturate ~size:sz da (union_infos da.P.infos db.P.infos) with
       | None -> true (* a is bottom *)
       | Some sa ->
-        match P.propagate ~size:sz sa with
+        match reduce ~size:sz sa with
         | None -> true (* a is bottom *)
         | Some ra ->
           P.matrix_implied_by sa.P.affeq db.P.affeq
@@ -672,7 +686,7 @@ struct
         | None, _ -> { d = Some db; env = sup_env } (* a is bottom *)
         | _, None -> { d = Some da; env = sup_env } (* b is bottom *)
         | Some sa, Some sb ->
-          match P.propagate ~size:sz sa, P.propagate ~size:sz sb with
+          match reduce ~size:sz sa, reduce ~size:sz sb with
           | None, _ -> { d = Some db; env = sup_env }
           | _, None -> { d = Some da; env = sup_env }
           | Some ra, Some rb ->
@@ -721,7 +735,7 @@ struct
         match P.saturate ~size:sz db (union_infos da.P.infos db.P.infos) with
         | None -> { d = Some da; env = sup_env } (* b is bottom *)
         | Some sb ->
-          match P.propagate ~size:sz sb with
+          match reduce ~size:sz sb with
           | None -> { d = Some da; env = sup_env }
           | Some rb ->
             let widened_m =
@@ -830,7 +844,7 @@ struct
         let sz = size t in
         let dim_x = Environment.dim_of_var t.env var in
         let rhs_iv =
-          match P.propagate ~size:sz d with
+          match reduce ~size:sz d with
           | None -> RationalInterval.top (* pre-state is bottom; detected below *)
           | Some refined -> P.eval_vec ~size:sz d refined v
         in
@@ -993,7 +1007,7 @@ struct
           in
           if violated then bot_env else t
         | _, DISEQ ->
-          (match P.propagate ~size:sz d with
+          (match reduce ~size:sz d with
            | None -> bot_env
            | Some refined ->
              (match RationalInterval.bounds (P.eval_vec ~size:sz d refined v) with

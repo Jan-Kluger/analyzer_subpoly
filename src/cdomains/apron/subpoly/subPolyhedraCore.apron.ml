@@ -125,7 +125,7 @@ module SubPoly (Var : Var) (I : IntervalSig with type bound = Q.t) = struct
 
   (* ---------------------------------------------------------------------- *)
   (* Reduction: interval propagation through the equality rows.
-     TODO: Implement simplex and linear basis exploration for better precision
+     TODO: Implement simplex for better precision
 
      This is a cheap, sound reduction in the spirit of the Simplex-based
      reduction of the paper: for every row [sum a_i x_i = c] and every variable
@@ -173,6 +173,104 @@ module SubPoly (Var : Var) (I : IntervalSig with type bound = Q.t) = struct
     let max_iter = max 2 (min 20 (List.length row_data + 1)) in
     try Some (go t.intervals max_iter)
     with Bottom -> None
+
+  (* ---------------------------------------------------------------------- *)
+  (* Reduction: basis exploration (rho_BE, Algorithm 3 of the paper) with the
+     linear explorer (delta_L).
+
+     [propagate] only moves bounds along the rows the rref pivoting happened
+     to produce; bounds that need a linear combination of rows (e.g. the
+     half-sum of two rows) are invisible to it. Basis exploration re-pivots
+     the equality system onto a statically fixed sequence of bases and refines
+     the interval of the basic variable of every row in each basis. The linear
+     explorer takes as bases all windows of [m] consecutive dimensions
+     (cyclically, in dimension order) out of the [n] dimensions occurring in
+     the matrix, where [m] is the number of rows; every pair of distinct
+     dimensions then has some basis containing the one but not the other.
+     Cost: [n] Gauss-Jordan eliminations of the [m]-row matrix. *)
+
+  (** One exploration pass over all bases of the linear explorer, starting
+      from the interval map [map]. Refinements found in earlier bases feed the
+      later ones. Returns [None] if a contradiction (bottom) is detected. *)
+  let explore_linear ~(size: int) (t: t) (map: interval_map) : interval_map option =
+    let rs = rows t.affeq in
+    let m = List.length rs in
+    if m = 0 then Some map
+    else begin
+      (* dimensions occurring in some row, in dimension order *)
+      let cand =
+        List.concat_map (fun r ->
+            List.filter_map (fun (i, _) -> if i < size then Some i else None)
+              (CoeffVector.to_sparse_list r)
+          ) rs
+        |> List.sort_uniq Int.compare
+        |> Array.of_list
+      in
+      let n = Array.length cand in
+      (* Gauss-Jordan elimination pivoting on the [basis] columns, in order;
+         returns the pivoted rows keyed by their pivot column. A basis column
+         that is linearly dependent on the earlier ones finds no pivot row and
+         is skipped. *)
+      let pivot_on (basis: int list) : (int * CoeffVector.t) list =
+        let step (pivoted, rest) b =
+          let rec pick acc = function
+            | [] -> None
+            | r :: rest when CoeffVector.nth r b <>: Mpqf.zero -> Some (r, List.rev_append acc rest)
+            | r :: rest -> pick (r :: acc) rest
+          in
+          match pick [] rest with
+          | None -> (pivoted, rest)
+          | Some (r0, rest) ->
+            let r0 = CoeffVector.apply_with_c_f_preserves_zero (/:) (CoeffVector.nth r0 b) r0 in
+            let elim r =
+              let c = CoeffVector.nth r b in
+              if c =: Mpqf.zero then r
+              else CoeffVector.map2_f_preserves_zero (fun x y -> x -: c *: y) r r0
+            in
+            ((b, r0) :: List.map (fun (b', r) -> (b', elim r)) pivoted, List.map elim rest)
+        in
+        fst (List.fold_left step ([], rs) basis)
+      in
+      (* the pivoted row has coefficient 1 on x_b: x_b = rhs - sum_{i<>b} a_i x_i *)
+      let refine map (b, r) =
+        let terms, rhs = split_row size r in
+        let vb = Var.to_t b in
+        let others = List.fold_left (fun acc (i, ai) ->
+            if Var.equal i vb then acc
+            else I.add acc (scale_iv ai (get_iv map i))
+          ) (I.of_const Q.zero) terms
+        in
+        let cand = I.add (I.of_const (q_of_mpqf rhs)) (I.scale Q.minus_one others) in
+        if I.is_top cand then map
+        else
+          let old = get_iv map vb in
+          match I.meet old cand with
+          | None -> raise Bottom
+          | Some res -> if I.equal res old then map else VarMap.add vb res map
+      in
+      let explore map i0 =
+        let basis = List.init (min m n) (fun k -> cand.((i0 + k) mod n)) in
+        List.fold_left refine map (pivot_on basis)
+      in
+      let num_bases = if n <= m then 1 else n in
+      try Some (List.fold_left explore map (List.init num_bases Fun.id))
+      with Bottom -> None
+    end
+
+  (** Reduction entry point: fixpoint interval propagation, optionally
+      followed by one basis-exploration pass and a final propagation pass
+      spreading the newly found bounds. Returns [None] on contradiction. *)
+  let reduce ~(size: int) ~(explore: bool) (t: t) : interval_map option =
+    match propagate ~size t with
+    | None -> None
+    | Some map ->
+      if not explore then Some map
+      else
+        match explore_linear ~size t map with
+        | None -> None
+        | Some map' ->
+          if map' == map then Some map (* exploration refined nothing *)
+          else propagate ~size { t with intervals = map' }
 
   (* ---------------------------------------------------------------------- *)
   (* Evaluation of linear expressions.

@@ -164,6 +164,7 @@ let widen_chain =
 module VM = SubPolyhedraDomain.VarManagement
 module P = VM.P
 module RI = Rationalinterval.RationalInterval
+module Mpqf = SharedFunctions.Mpqf
 
 let eval_linexp ((k, cs): linexp) (sigma: Q.t array) : Q.t =
   List.fold_left (fun (acc, i) c -> (Q.add acc (Q.mul (Q.of_int c) sigma.(i)), i + 1))
@@ -278,6 +279,30 @@ let soundness_oracle =
   test ~count:300 "concrete execution stays in abstraction"
     (QCheck.make ~print:print_trace gen_trace)
     (fun tr -> ignore (run_trace tr); true)
+
+(* basis exploration is a reduction: whatever bounds it adds, the concrete
+   point that survived the trace must still lie within the reduced intervals
+   (the matrix is untouched by reduction) *)
+let explore_soundness =
+  test ~count:300 "basis exploration keeps concrete points"
+    (QCheck.make ~print:print_trace gen_trace)
+    (fun tr ->
+       let (t, sigma, _) = run_trace tr in
+       let point () = String.concat "; " (List.map Q.to_string (Array.to_list sigma)) in
+       match t.VM.d with
+       | None -> true
+       | Some d ->
+         let sz = GobApron.Environment.size (D.env t) in
+         match P.reduce ~size:sz ~explore:true d with
+         | None ->
+           Test.fail_reportf "exploration made a state containing a concrete point bottom@.point: [%s]@.state: %s"
+             (point ()) (D.show t)
+         | Some ivs ->
+           let t' = { t with VM.d = Some { d with P.intervals = ivs } } in
+           if mem_point t' sigma then true
+           else
+             Test.fail_reportf "concrete point escaped after basis exploration@.point: [%s]@.state: %s"
+               (point ()) (D.show t'))
 
 (* the bounds query must contain the concrete value of the expression *)
 let bounds_oracle =
@@ -451,9 +476,44 @@ let poly_diff =
        | Some msg ->
          Test.fail_reportf "polyhedra refutes subpoly at end of trace: %s@.state: %s" msg (D.show t))
 
+(* Deterministic check of basis exploration on Example 5 of the paper: in the
+   state [v0 + v2 + v3 = 1; v1 + v2 - v3 = 0] with v0 in [0,2], v1 in [0,3],
+   bounds for v2 and v3 exist only through linear combinations of the two rows
+   (half-sum and half-difference), which propagation along the fixed rref rows
+   cannot see. The linear explorer's basis {v2, v3} re-pivots the system into
+   [v2 + v0/2 + v1/2 = 1/2; v3 + v0/2 - v1/2 = 1/2] and yields the optimal
+   bounds v2 = (1 - v0 - v1)/2 in [-2, 1/2], v3 = (1 - v0 + v1)/2 in [-1/2, 2]. *)
+let explore_example5 =
+  "basis exploration reduction (paper Example 5)" >:: fun _ ->
+    let sz = 4 in
+    let mq = Mpqf.of_int in
+    let row terms rhs = P.vec_of_terms sz (List.map (fun (i, c) -> (i, mq c)) terms) (mq rhs) in
+    let m = P.Matrix.empty () in
+    let m = Option.get (P.Matrix.rref_vec m (row [(0, 1); (2, 1); (3, 1)] 1)) in
+    let m = Option.get (P.Matrix.rref_vec m (row [(1, 1); (2, 1); (3, -1)] 0)) in
+    let iv lo hi = RI.of_bounds ~lower:(Some lo) ~upper:(Some hi) in
+    let iv_int lo hi = iv (Q.of_int lo) (Q.of_int hi) in
+    let ivs = P.VarMap.add 0 (iv_int 0 2) (P.VarMap.add 1 (iv_int 0 3) P.VarMap.empty) in
+    let st = { P.affeq = m; P.intervals = ivs; P.infos = P.VarMap.empty } in
+    let plain = Option.get (P.reduce ~size:sz ~explore:false st) in
+    assert_bool "propagation alone should not bound v2" (RI.is_top (P.get_iv plain 2));
+    assert_bool "propagation alone should not bound v3" (RI.is_top (P.get_iv plain 3));
+    let reduced = Option.get (P.reduce ~size:sz ~explore:true st) in
+    let expect name dim want =
+      let got = P.get_iv reduced dim in
+      assert_bool
+        (Printf.sprintf "%s should be %s, got %s" name (RI.show want) (RI.show got))
+        (RI.equal got want)
+    in
+    let half n = Q.make (Z.of_int n) (Z.of_int 2) in
+    expect "v0" 0 (iv_int 0 2);
+    expect "v1" 1 (iv_int 0 3);
+    expect "v2" 2 (iv (Q.of_int (-2)) (half 1));
+    expect "v3" 3 (iv (half (-1)) (Q.of_int 2))
+
 let tests =
   E.tests @ Le.tests @ J.tests @ M.tests @ B.tests @ T.tests @ C.tests @ W.tests @ N.tests
-  @ [invariants_state; invariants_ops; widen_chain; soundness_oracle; bounds_oracle; poly_diff]
+  @ [invariants_state; invariants_ops; widen_chain; soundness_oracle; explore_soundness; bounds_oracle; poly_diff]
 
 let test () =
-  "subPolyhedraDomain" >::: QCheck_ounit.to_ounit2_test_list tests
+  "subPolyhedraDomain" >::: explore_example5 :: QCheck_ounit.to_ounit2_test_list tests
