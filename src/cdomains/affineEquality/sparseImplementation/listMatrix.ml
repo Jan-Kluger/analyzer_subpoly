@@ -11,6 +11,10 @@ let timing_wrap = Vector.timing_wrap
 module type SparseMatrix =
 sig
   include Matrix
+
+  val map : (vec -> vec) -> t -> t
+
+  val fold_left :('acc -> vec -> 'acc) -> 'acc -> t -> 'acc
   val get_col_upper_triangular: t -> int -> vec
 
   val swap_rows: t -> int -> int -> t
@@ -42,8 +46,10 @@ module ListMatrix: SparseMatrixFunctor =
     type t = V.t list (* List of rows *)
     [@@deriving eq, ord, hash]
 
-    let show x =
-      List.fold_left (^) "" (List.map (fun x -> (V.show x)) x)
+  let show matrix =
+  matrix
+  |> List.map V.show
+  |> String.concat "\n    "
 
     let copy m = m
 
@@ -60,6 +66,9 @@ module ListMatrix: SparseMatrixFunctor =
 
     let compare_num_rows = List.compare_lengths
 
+
+    let map f m  = List.map f m
+    let fold_left f acc m = List.fold_left f acc m
     let num_cols m =
       if m = [] then 0 else V.length (List.hd m)
 
@@ -408,6 +417,12 @@ module ListMatrix: SparseMatrixFunctor =
         col, rc
       in
 
+      (* keep only the entries of a column vector that lie in rows strictly above [rowidx] *)
+      let keep_rows_above rowidx col =
+        V.of_sparse_list (V.length col)
+          (List.filter (fun (i, _) -> i < rowidx) (V.to_sparse_list col))
+      in
+
       let push_col m colidx col =
         List.mapi (fun idx row ->
             match V.nth col idx with
@@ -441,7 +456,7 @@ module ListMatrix: SparseMatrixFunctor =
             | (i1, v1) :: xs1, (i2, v2) :: xs2    when i1 < i2   -> sub_and_last_aux ((i1,v1)::acclist,Some (i1,v1,A.zero)) xs1 ((i2, v2)::xs2)
             | (i1, v1) :: xs1, (i2, v2) :: xs2 (* when i1 > i2 *)-> sub_and_last_aux ((i2,A.neg v2)::acclist,Some (i2,A.zero,v2))  ((i1, v1)::xs1) xs2
             | (i,v)::xs ,[] -> sub_and_last_aux ((i,v)::acclist,Some (i,v,A.zero)) xs []
-            | [], (i,v)::xs -> sub_and_last_aux ((i,v)::acclist,Some (i,A.zero,v)) [] xs
+            | [], (i,v)::xs -> sub_and_last_aux ((i,A.neg v)::acclist,Some (i,A.zero,v)) [] xs
             | [], [] -> (acclist,acc)
           in
           let resl,rest = sub_and_last_aux ([],None) c1 c2 in
@@ -486,25 +501,36 @@ module ListMatrix: SparseMatrixFunctor =
                       (currentrowindex + 1) (currentcolindex+1)
                       (del_col m1 currentrowindex) (del_col m2 currentrowindex)
                       (List.mapi (fun idx row -> if idx = currentrowindex then V.push_first row currentcolindex A.one else row) result)
-          | 1, 0 -> let beta = get_col_upper_triangular m2 currentcolindex in
+          (* Only the matrix owning the pivot loses its pivot row (after case_two folds it
+             into the rows above); the other matrix and the result keep all their rows
+             (cf. the dense reference lin_disjunc: `lin_disjunc r (s+1) (case_two a r col_b) b`).
+             The result rows above get the other matrix's column pushed, which is what the
+             dense version's in-place case_two leaves in the processed rows. *)
+          | 1, 0 ->
+            (* only result rows above the current row get the other matrix's column value,
+               mirroring the dense case_two's `if i < r` guard *)
+            let beta = keep_rows_above currentrowindex (get_col_upper_triangular m2 currentcolindex) in
             if M.tracing then M.trace "linear_disjunct_cases" "case 1,0: currentrowindex: %d, currentcolindex: %d, m1: \n%s, m2:\n%s , beta %s" currentrowindex currentcolindex (show m1) (show m2) (V.show beta);
             lindisjunc_aux
               (currentrowindex) (currentcolindex+1)
-              (safe_remove_row (case_two m1 currentrowindex col2) currentrowindex) (safe_remove_row m2 currentrowindex)
-              (safe_remove_row (push_col result currentcolindex beta) currentrowindex)
-          | 0, 1 -> let beta = get_col_upper_triangular m1 currentcolindex in
+              (safe_remove_row (case_two m1 currentrowindex col2) currentrowindex) m2
+              (push_col result currentcolindex beta)
+          | 0, 1 ->
+            let beta = keep_rows_above currentrowindex (get_col_upper_triangular m1 currentcolindex) in
             if M.tracing then M.trace "linear_disjunct_cases" "case 0,1: currentrowindex: %d, currentcolindex: %d, m1: \n%s, m2:\n%s , beta %s" currentrowindex currentcolindex (show m1) (show m2) (V.show beta);
             lindisjunc_aux
               (currentrowindex) (currentcolindex+1)
-              (safe_remove_row m1 currentrowindex) (safe_remove_row (case_two m2 currentrowindex col1) currentrowindex)
-              (safe_remove_row (push_col result currentcolindex beta) currentrowindex)
+              m1 (safe_remove_row (case_two m2 currentrowindex col1) currentrowindex)
+              (push_col result currentcolindex beta)
           | 0, 0 -> let m1 , m2, result, currentrowindex = case_three col1 col2 m1 m2 result currentrowindex currentcolindex in
             lindisjunc_aux currentrowindex (currentcolindex+1) m1 m2 result  (* we need to process m1, m2 and result *)
           | a,b -> failwith ("matrix not in rref m1: " ^ (string_of_int a) ^ (string_of_int b)^(show m1) ^ " m2: " ^ (show m2))
       in
       (* create a totally empty intial result, with dimensions rows x cols *)
-      let pseudoempty = BatList.make (max (num_rows m1) (num_rows m1)) (V.zero_vec (num_cols m1)) in
-      let res = rev_matrix @@ lindisjunc_aux 0 0 m1 m2 pseudoempty in
+      let pseudoempty = BatList.make (max (num_rows m1) (num_rows m2)) (V.zero_vec (num_cols m1)) in
+      (* unused result slots stay all-zero; drop them, downstream code (is_covered_by)
+         relies on row counts of rref matrices *)
+      let res = remove_zero_rows @@ rev_matrix @@ lindisjunc_aux 0 0 m1 m2 pseudoempty in
       if M.tracing then M.tracel "linear_disjunct" "linear_disjunct between \n%s and \n%s =>\n%s" (show m1)  (show m2) (show res);
       res
 

@@ -13,6 +13,10 @@
         (apron apron.polkaMPQ -> subPolyhedraDomainTest.apron.ml)
         (-> subPolyhedraDomainTest.no-apron.ml)
     )
+    (select subPolyhedraManDomainTest.ml from
+        (apron apron.polkaMPQ -> subPolyhedraManDomainTest.apron.ml)
+        (-> subPolyhedraManDomainTest.no-apron.ml)
+    )
   )
   (preprocess (pps ppx_deriving.std ppx_deriving_hash ppx_deriving_yojson))
   (flags :standard -open Goblint_std -linkall))

@@ -16,6 +16,12 @@ sig
 
   val insert_zero_at_indices: t -> (int * int) list -> int -> t
 
+  val map: (int * num -> int * num) -> t -> t
+
+  val fold_left: ('acc -> int * num -> 'acc) -> 'acc -> t -> 'acc
+
+  val equal: t -> t -> bool 
+
   val remove_at_indices: t -> int list -> t
 
   (* Returns the part of the vector starting from index n*)
@@ -51,9 +57,29 @@ module SparseVector: SparseVectorFunctor =
     type t = {
       entries: (int * A.t) list ;
       len: int
-    }[@@deriving eq, ord, hash]
+    }[@@deriving ord, hash]
 
     let copy v = v
+
+    let map (f : (int * A.t) -> (int * A.t)) (v : t)  : t = {v with entries = List.map f v.entries}
+
+    let fold_left f acc v = List.fold_left f acc v.entries
+
+    
+    let equal a b = 
+      if a.len <> b.len then false else
+        let rec cmp_entries a_entries b_entries = 
+          match a_entries, b_entries with 
+          | (_, val1) :: r1, _ when val1 = A.zero -> cmp_entries r1 b_entries
+          | _, (_, val2) :: r2 when val2 = A.zero -> cmp_entries a_entries r2
+          | (idx1, val1) :: r1, (idx2, val2) :: r2 -> 
+            idx1 = idx2 && A.equal val1 val2 && cmp_entries r1 r2
+          | [], [] -> true
+          | _ -> false 
+        in
+        cmp_entries a.entries b.entries
+    
+
 
     (** [of_list l] returns a vector constructed from the non-sparse list [l] *)
     let of_list l =
@@ -92,16 +118,21 @@ module SparseVector: SparseVectorFunctor =
       v.entries
 
     let show v =
-      let rec sparse_list_str i l =
-        if i >= v.len then "]"
+      let pad_str s = Printf.sprintf "%4s" s in
+      let zero_str = pad_str (A.to_string A.zero) in
+      let rec build_elements i entries acc =
+        if i >= v.len then 
+          List.rev acc
         else
-          match l with
-          | [] -> (A.to_string A.zero) ^" "^ (sparse_list_str (i + 1) l)
-          | (idx, value) :: xs ->
-            if i = idx then (A.to_string value) ^" "^ sparse_list_str (i + 1) xs
-            else (A.to_string A.zero) ^" "^ sparse_list_str (i + 1) l
+          match entries with
+          | (idx, value) :: rest when idx = i ->
+            let val_str = pad_str (A.to_string value) in
+            build_elements (i + 1) rest (val_str :: acc)
+          | _ ->
+            build_elements (i + 1) entries (zero_str :: acc)
       in
-      "["^(sparse_list_str 0 v.entries)^"\n"
+      let elements = build_elements 0 v.entries [] in
+      Printf.sprintf "[ %s ]" (String.concat " " elements)
 
     let length v =
       v.len

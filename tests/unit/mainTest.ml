@@ -9,6 +9,7 @@ let all_tests =
     LvalTest.test ();
     SparseMatrixImplementationTest.test () ;
     SubPolyhedraDomainTest.test () ;
+    SubPolyhedraManDomainTest.test () ;
     CompilationDatabaseTest.tests;
     LibraryDslTest.tests;
     CilfacadeTest.tests;
