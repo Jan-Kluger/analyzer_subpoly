@@ -398,7 +398,8 @@ let string_of (t: t) =
       then match VarMap.min_binding_opt a.intervals, VarMap.min_binding_opt b.intervals with 
         | Some (ka, _), Some (kb, _) -> Int.min ka kb
         | Some (k, _), None | None, Some (k, _) -> k
-        | None, None -> 0
+        | None, None ->   (max (Matrix.num_cols a.affeq) (Matrix.num_cols b.affeq)) - 1
+           (* - 1 because we add + 1 for the length calc later in this case, max because one matrix might not have rows.*)
       else let update_maximum_idx _ v m = max v m in (*find the smallest index that is available: *)
         (IntMap.fold update_maximum_idx map_b @@ IntMap.fold update_maximum_idx map_a 0) + 1
     in
