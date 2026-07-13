@@ -347,7 +347,6 @@ same indices. Then it calls SubPolyDomain.widen on the updated subpolyhedra. Ada
       let a_d' = if env_comp = 0 then a_d else dim_add (Environment.dimchange a.env b.env) a_d in
       SubPolyDomain.leq a_d' b_d
   
-  let widen _a _b = failwith "SubPolyhedraDomain.widen: not implemented" (* join *)
   let narrow = meet
   let unify = meet
 
