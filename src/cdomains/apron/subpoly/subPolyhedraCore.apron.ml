@@ -1,12 +1,11 @@
 module Mpqf = SharedFunctions.Mpqf
 open Intervalsig
-
+open OcplibSimplex
 include Batteries
-
 
 (** Variable type used by the subpolyhedra core. *)
 module type Var = sig
-  type t [@@deriving hash]
+  type t = int [@@deriving hash] (*Added int here so we don't need Var.to_int everywhere. This most likely won't change to another type.*)
   val equal : t -> t -> bool
   val compare : t -> t -> int
   val string_of : t -> string
@@ -14,17 +13,63 @@ module type Var = sig
   val to_t : int -> t
 end
 
-(** Internal representation of a consistent subpolyhedron.
+(** Simplex solver instantiation used by the LP-based reduction.
+    LP variables are matrix column indices (>= 0) *)
+module Simplex = struct
+  (** The number type the solver computes with, for constraint coefficients, bounds and
+      solution values alike. ocplib-simplex demands its own [Rationals] interface
+      (extSigs.mli), which Mpqf almost satisfies: this adapter is mostly renames
+      ([mult] = [mul], [minus] = [neg], [sign] = [sgn], ...) plus [floor]/[ceiling]/[is_int],
+      which Mpqf lacks. With rationals we dont have the float imperciscion *)
+  module LpRat = struct
+    include Mpqf
+    let m_one = mone
+    let sign = sgn
+    let is_zero x = equal x zero
+    let is_one x = equal x one
+    let is_m_one x = equal x m_one
+    let mult = mul
+    let minus = neg
+    let min a b = if cmp a b <= 0 then a else b
+    let is_int x = Z.equal (get_den x) Z.one
+    let of_z z = of_mpz @@ Z_mlgmpidl.mpzf_of_z z
+    let floor x = of_z @@ Z.fdiv (get_num x) (get_den x)
+    let ceiling x = of_z @@ Z.cdiv (get_num x) (get_den x)
+  end
 
-    The state consists of three components over a common dimension space:
-    - [affeq]: affine equalities, kept in rref. Row semantics for a row [r] of
-      length [size + 1]: [sum_{i < size} r(i) * x_i = r(size)].
-    - [intervals]: interval bounds for dimensions (program variables and slacks).
-      A missing entry means top.
-    - [infos]: for each slack dimension [beta], the linear form it was introduced
-      for: [beta = sum iterms + iconst]. Invariant: this equality is implied by
-      [affeq], and [iterms] only mentions program (non-slack) dimensions. *)
-module SubPoly (Var : Var) (I : IntervalSig with type bound = Q.t) = struct
+  (** The solver's variable type: plain ints. Non-negative values are matrix column
+      indices (program and slack columns); negative values are internal handles that
+      name equality rows (see [assert_row]), so the two can never collide.
+      [is_int = false] declares variables rational-valued: we solve over Q, not an
+      integer LP. *)
+  module LpVar = struct
+    type t = int
+    let compare = Int.compare
+    let is_int _ = false
+    let print fmt v = Format.fprintf fmt "v%d" v
+  end
+
+  (** "Explanations" are labels an SMT solver *)
+  module LpEx = struct
+    type t = unit
+    let empty = ()
+    let union () () = ()
+    let print fmt () = Format.fprintf fmt "()"
+  end
+
+  (* [Basic.Make] wires the three parameter modules into the full solver and exposes:
+     [Core]   solver state [Core.t], bounds, polys [Core.P] and the [result] type;
+     [Assert] adding constraints ([Assert.var] bounds a variable, [Assert.poly] a linear form);
+     [Solve]  running the algorithm ([Solve.solve] feasibility, [Solve.maximize] optimization);
+     [Result] decoding a solved state into Sat/Unsat/Max/Unbounded. *)
+  include Basic.Make (LpVar) (LpRat) (LpEx)
+end
+
+open Simplex
+
+
+(** Internal representation of a consistent subpolyhedron. *)
+module SubPoly (Var : Var) (I : IntervalSig with type bound = Mpqf.t) = struct
   (* Reuse the SparseVector and ListMatrix modules from the AffineEqualityDomain. *)
   include RatOps.ConvenienceOps (Mpqf)
 
@@ -33,23 +78,23 @@ module SubPoly (Var : Var) (I : IntervalSig with type bound = Q.t) = struct
   module Matrix =
     AffineEqualityDomain.AffineEqualityMatrix
       (Vector)
-      (ListMatrix.ListMatrix)
-
+      (ListMatrix.ListMatrix) (*Question: do we actually use this, if we just use the Matrix and Vector implementations? *)
+        (*QUESTION: Why don't we use the affineEqualityDenseDomain?*)
   (* Map keyed by variables. *)
   module VarMap = Map.Make(Var)
+  module IntMap = Map.Make (Int)
 
   type affeq = Matrix.t [@@deriving eq, ord, hash] (*Our affine equality matrix.*)
   type interval_map = I.t VarMap.t [@@deriving eq, ord] (*Map from Var to Interval*)
-  type info = {
-    iterms: (Var.t * Mpqf.t) list; (* sorted by Var, nonzero coefficients, program dims only *)
-    iconst: Mpqf.t;
-  } [@@deriving eq, ord, hash]
-  type info_map = info VarMap.t [@@deriving eq, ord] (*Map from slack Var to info*)
+  type info = CoeffVector.t [@@deriving eq, ord, hash] (*Coefficient vector over the matrix columns (constant in the last position)*)
+  type info_map = info VarMap.t [@@deriving eq, ord] (*Map from Var to info*)
 
   let hash_interval_map (m: interval_map) =
     VarMap.fold (fun var interval acc ->
         Hashtbl.hash (Var.hash var, I.hash interval, acc)
       ) m 0
+
+  let hash_slackintervals = hash_interval_map
 
   let hash_info_map (m: info_map) =
     VarMap.fold (fun var info acc ->
@@ -57,10 +102,13 @@ module SubPoly (Var : Var) (I : IntervalSig with type bound = Q.t) = struct
       ) m 0
 
   type t = {
-    affeq: affeq; (*Affine Equalities stored as sparse Matrix*)
-    intervals: interval_map; (*Map of vars to intervals*)
+    affeq: affeq; (*Affine Equalities stored as (sparse?) Matrix*)
+    intervals: interval_map; (*Map of slack vars to intervals*)
     infos: info_map; (*Map of slack vars to info*)
   } [@@deriving eq, ord, hash]
+
+
+  (* Everything here is TODO, it has AI generated placeholds so i could run the regtest *)
 
   let copy = Fun.id
 
@@ -72,577 +120,524 @@ module SubPoly (Var : Var) (I : IntervalSig with type bound = Q.t) = struct
   let set_info (var: Var.t) (info: info) (t : t)  =
     {t with infos = VarMap.add var info t.infos}
 
-  let set_intv (var: Var.t) (intv: I.t) (t: t) =
+  let set_intv (var: Var.t) (intv: I.t) (t: t) = 
     {t with intervals = VarMap.add var intv t.intervals}
-
-  let mem_info (var: Var.t) (t: t) =
+  let mem_info (var: Var.t) (t: t) = 
     VarMap.mem var t.infos
 
   let mem_intv (var: Var.t) (t: t) =
     VarMap.mem var t.intervals
 
-  let get_iv (m: interval_map) (var: Var.t) =
-    Option.default I.top (VarMap.find_opt var m)
-
-  (* ---------------------------------------------------------------------- *)
-  (* Rational helpers *)
-
-  let q_of_mpqf (x: Mpqf.t) : Q.t =
-    Q.make (Mpqf.get_num x) (Mpqf.get_den x)
-
-  let is_integral (x: Mpqf.t) = Z.equal (Mpqf.get_den x) Z.one
-
-  (* ---------------------------------------------------------------------- *)
-  (* Row and vector helpers *)
-
-  let rows (m: affeq) : CoeffVector.t list =
-    List.init (Matrix.num_rows m) (Matrix.get_row m)
-
-  (** Splits a vector of length [size + 1] into its term entries (index < size)
-      and the entry at index [size] (RHS for matrix rows, constant for value-form
-      vectors). *)
-  let split_row (size: int) (r: CoeffVector.t) : (Var.t * Mpqf.t) list * Mpqf.t =
-    let entries = CoeffVector.to_sparse_list r in
-    let terms, last = List.partition (fun (i, _) -> i < size) entries in
-    List.map (fun (i, c) -> (Var.to_t i, c)) terms,
-    (match last with [] -> Mpqf.zero | (_, c) :: _ -> c)
-
-  (** Builds a sparse vector of length [size + 1] from term entries and the last
-      entry. Terms need not be sorted; zero coefficients are dropped. Duplicate
-      variables are summed up. *)
-  let vec_of_terms (size: int) (terms: (Var.t * Mpqf.t) list) (last: Mpqf.t) : CoeffVector.t =
-    let merged = List.fold_left (fun acc (v, c) ->
-        let i = Var.to_int v in
-        VarMap.modify_def Mpqf.zero (Var.to_t i) ((+:) c) acc
-      ) VarMap.empty terms
-    in
-    let entries =
-      VarMap.fold (fun v c acc -> if c =: Mpqf.zero then acc else (Var.to_int v, c) :: acc) merged []
-      |> List.sort (fun (i, _) (j, _) -> Int.compare i j)
-    in
-    let entries = if last =: Mpqf.zero then entries else entries @ [(size, last)] in
-    CoeffVector.of_sparse_list (size + 1) entries
-
-  (* ---------------------------------------------------------------------- *)
-  (* Reduction: interval propagation through the equality rows.
-     TODO: Implement simplex for better precision
-
-     This is a cheap, sound reduction in the spirit of the Simplex-based
-     reduction of the paper: for every row [sum a_i x_i = c] and every variable
-     x_j of the row, the implied bound [(c - sum_{i<>j} a_i x_i) / a_j] is met
-     into the interval of x_j, iterated until a fixpoint or an iteration cap is
-     reached. Returns [None] if a contradiction (bottom) is detected. *)
-
-  exception Bottom
-
-  let scale_iv (c: Mpqf.t) (iv: I.t) = I.scale (q_of_mpqf c) iv
-
-  let propagate ~(size: int) (t: t) : interval_map option =
-    let row_data = List.map (split_row size) (rows t.affeq) in
-    let refine_row (map, changed) (terms, rhs) =
-      match terms with
-      | [] -> (map, changed) (* constant rows cannot occur in a consistent rref matrix *)
-      | _ ->
-        List.fold_left (fun (map, changed) (j, a) ->
-            (* x_j = (rhs - sum_{i<>j} a_i * x_i) / a *)
-            let others = List.fold_left (fun acc (i, ai) ->
-                if Var.equal i j then acc
-                else I.add acc (scale_iv ai (get_iv map i))
-              ) (I.of_const Q.zero) terms
-            in
-            let cand =
-              I.scale (Q.inv (q_of_mpqf a))
-                (I.add (I.of_const (q_of_mpqf rhs)) (I.scale Q.minus_one others))
-            in
-            if I.is_top cand then (map, changed)
-            else
-              let old = get_iv map j in
-              match I.meet old cand with
-              | None -> raise Bottom
-              | Some res ->
-                if I.equal res old then (map, changed)
-                else (VarMap.add j res map, true)
-          ) (map, changed) terms
-    in
-    let rec go map k =
-      if k <= 0 then map
-      else
-        let map', changed = List.fold_left refine_row (map, false) row_data in
-        if changed then go map' (k - 1) else map'
-    in
-    let max_iter = max 2 (min 20 (List.length row_data + 1)) in
-    try Some (go t.intervals max_iter)
-    with Bottom -> None
-
-  (* ---------------------------------------------------------------------- *)
-  (* Reduction: basis exploration (rho_BE, Algorithm 3 of the paper) with the
-     linear explorer (delta_L).
-
-     [propagate] only moves bounds along the rows the rref pivoting happened
-     to produce; bounds that need a linear combination of rows (e.g. the
-     half-sum of two rows) are invisible to it. Basis exploration re-pivots
-     the equality system onto a statically fixed sequence of bases and refines
-     the interval of the basic variable of every row in each basis. The linear
-     explorer takes as bases all windows of [m] consecutive dimensions
-     (cyclically, in dimension order) out of the [n] dimensions occurring in
-     the matrix, where [m] is the number of rows; every pair of distinct
-     dimensions then has some basis containing the one but not the other.
-     Cost: [n] Gauss-Jordan eliminations of the [m]-row matrix. *)
-
-  (** One exploration pass over all bases of the linear explorer, starting
-      from the interval map [map]. Refinements found in earlier bases feed the
-      later ones. Returns [None] if a contradiction (bottom) is detected. *)
-  let explore_linear ~(size: int) (t: t) (map: interval_map) : interval_map option =
-    let rs = rows t.affeq in
-    let m = List.length rs in
-    if m = 0 then Some map
-    else begin
-      (* dimensions occurring in some row, in dimension order *)
-      let cand =
-        List.concat_map (fun r ->
-            List.filter_map (fun (i, _) -> if i < size then Some i else None)
-              (CoeffVector.to_sparse_list r)
-          ) rs
-        |> List.sort_uniq Int.compare
-        |> Array.of_list
-      in
-      let n = Array.length cand in
-      (* Gauss-Jordan elimination pivoting on the [basis] columns, in order;
-         returns the pivoted rows keyed by their pivot column. A basis column
-         that is linearly dependent on the earlier ones finds no pivot row and
-         is skipped. *)
-      let pivot_on (basis: int list) : (int * CoeffVector.t) list =
-        let step (pivoted, rest) b =
-          let rec pick acc = function
-            | [] -> None
-            | r :: rest when CoeffVector.nth r b <>: Mpqf.zero -> Some (r, List.rev_append acc rest)
-            | r :: rest -> pick (r :: acc) rest
-          in
-          match pick [] rest with
-          | None -> (pivoted, rest)
-          | Some (r0, rest) ->
-            let r0 = CoeffVector.apply_with_c_f_preserves_zero (/:) (CoeffVector.nth r0 b) r0 in
-            let elim r =
-              let c = CoeffVector.nth r b in
-              if c =: Mpqf.zero then r
-              else CoeffVector.map2_f_preserves_zero (fun x y -> x -: c *: y) r r0
-            in
-            ((b, r0) :: List.map (fun (b', r) -> (b', elim r)) pivoted, List.map elim rest)
-        in
-        fst (List.fold_left step ([], rs) basis)
-      in
-      (* the pivoted row has coefficient 1 on x_b: x_b = rhs - sum_{i<>b} a_i x_i *)
-      let refine map (b, r) =
-        let terms, rhs = split_row size r in
-        let vb = Var.to_t b in
-        let others = List.fold_left (fun acc (i, ai) ->
-            if Var.equal i vb then acc
-            else I.add acc (scale_iv ai (get_iv map i))
-          ) (I.of_const Q.zero) terms
-        in
-        let cand = I.add (I.of_const (q_of_mpqf rhs)) (I.scale Q.minus_one others) in
-        if I.is_top cand then map
-        else
-          let old = get_iv map vb in
-          match I.meet old cand with
-          | None -> raise Bottom
-          | Some res -> if I.equal res old then map else VarMap.add vb res map
-      in
-      let explore map i0 =
-        let basis = List.init (min m n) (fun k -> cand.((i0 + k) mod n)) in
-        List.fold_left refine map (pivot_on basis)
-      in
-      let num_bases = if n <= m then 1 else n in
-      try Some (List.fold_left explore map (List.init num_bases Fun.id))
-      with Bottom -> None
-    end
-
-  (** Reduction entry point: fixpoint interval propagation, optionally
-      followed by one basis-exploration pass and a final propagation pass
-      spreading the newly found bounds. Returns [None] on contradiction. *)
-  let reduce ~(size: int) ~(explore: bool) (t: t) : interval_map option =
-    match propagate ~size t with
-    | None -> None
-    | Some map ->
-      if not explore then Some map
-      else
-        match explore_linear ~size t map with
-        | None -> None
-        | Some map' ->
-          if map' == map then Some map (* exploration refined nothing *)
-          else propagate ~size { t with intervals = map' }
-
-  (* ---------------------------------------------------------------------- *)
-  (* Evaluation of linear expressions.
-
-     Value-form vectors [e] of length [size + 1] denote the value
-     [sum_{i < size} e(i) * x_i + e(size)]. *)
-
-  let eval_value_vec ~(size: int) (map: interval_map) (e: CoeffVector.t) : I.t =
-    let terms, const = split_row size e in
-    List.fold_left (fun acc (i, a) -> I.add acc (scale_iv a (get_iv map i)))
-      (I.of_const (q_of_mpqf const)) terms
-
-  (** Reduces a value-form vector modulo the equality rows by eliminating the
-      pivot variable of every row (Gaussian reduction). The result denotes the
-      same value on every state satisfying the equalities. *)
-  let reduce_value_vec ~(size: int) (m: affeq) (e: CoeffVector.t) : CoeffVector.t =
-    List.fold_left (fun e r ->
-        match CoeffVector.find_first_non_zero r with
-        | Some (p, pv) when p < size ->
-          let c = CoeffVector.nth e p in
-          if c =: Mpqf.zero then e
-          else
-            (* zero-form of the row: sum r(i) * x_i - rhs = 0 *)
-            let zrow = CoeffVector.set_nth r size (Mpqf.neg (CoeffVector.nth r size)) in
-            let lambda = c /: pv in
-            CoeffVector.map2_f_preserves_zero (fun x y -> x -: lambda *: y) e zrow
-        | _ -> e
-      ) e (rows m)
-
-  (** Evaluates a value-form vector using the refined intervals, both directly
-      and after Gaussian reduction modulo the equality rows, and meets the two
-      results. *)
-  let eval_vec ~(size: int) (t: t) (refined: interval_map) (e: CoeffVector.t) : I.t =
-    let direct = eval_value_vec ~size refined e in
-    let reduced = reduce_value_vec ~size t.affeq e in
-    let via_rows = eval_value_vec ~size refined reduced in
-    match I.meet direct via_rows with
-    | Some iv -> iv
-    | None -> direct (* only happens on bottom states; any sound answer is fine *)
-
-  (* ---------------------------------------------------------------------- *)
-  (* Slack handling *)
-
-  (** Defining row of a slack: [beta = sum iterms + iconst], in RHS form
-      [sum iterms - beta = -iconst]. *)
-  let defining_row (size: int) (beta: Var.t) (info: info) : CoeffVector.t =
-    vec_of_terms size ((beta, Mpqf.mone) :: info.iterms) (Mpqf.neg info.iconst)
-
-  (** Establishes the defining rows of all slacks of [other_infos] in [t].
-      Returns [None] if this exposes an inconsistency (i.e. [t] is bottom).
-
-      Even when [t] already knows a slack, its defining row may have been
-      dropped by a previous hull (join/widen keep info and interval of slacks
-      whose row the hull discards); defining rows are universally valid, so
-      unconditionally re-establishing them is sound and a no-op whenever the
-      row is already implied. *)
-  let saturate ~(size: int) (t: t) (other_infos: info_map) : t option =
-    VarMap.fold (fun beta info acc ->
-        Option.bind acc (fun t ->
-            match Matrix.rref_vec t.affeq (defining_row size beta info) with
-            | None -> None
-            | Some m -> Some { t with affeq = m; infos = VarMap.add beta info t.infos }
-          )
-      ) other_infos (Some t)
-
-  (** [row_implied_by m r]: the RHS-form row [r] is a linear combination of the
-      rows of the rref matrix [m] (i.e. the equality [r] is implied by [m]). *)
-  let row_implied_by (m: affeq) (r: CoeffVector.t) : bool =
-    let r' = List.fold_left (fun r row ->
-        match CoeffVector.find_first_non_zero row with
-        | Some (p, pv) ->
-          let c = CoeffVector.nth r p in
-          if c =: Mpqf.zero then r
-          else CoeffVector.map2_f_preserves_zero (fun x y -> x -: (c /: pv) *: y) r row
-        | None -> r
-      ) r (rows m)
-    in
-    CoeffVector.is_zero_vec r'
-
-  (** [matrix_implied_by m m']: all rows of [m'] are implied by [m]. *)
-  let matrix_implied_by (m: affeq) (m': affeq) : bool =
-    List.for_all (row_implied_by m) (rows m')
-
-  (** Rows of [m] that are not implied by [joined]. *)
-  let dropped_rows (m: affeq) (joined: affeq) : CoeffVector.t list =
-    List.filter (fun r -> not (row_implied_by joined r)) (rows m)
-
-  (** Affine hull (join) of two consistent equality systems, computed exactly:
-      an equality is valid on the union iff it is implied by each operand, so
-      the hull's row space is the intersection of the two augmented row
-      spaces, computed with the Zassenhaus algorithm.
-
-      Not the library's [Matrix.linear_disjunct], which loses rows when the
-      pivot structures of the operands differ (e.g. the hull of [y=-4] and
-      [x-z=-5; y=-4] comes out empty instead of [y=-4]). *)
-  let affine_hull ~(size: int) (m1: affeq) (m2: affeq) : affeq =
-    let w = size + 1 in
-    (* (u | u) for rows of m1, (v | 0) for rows of m2 *)
-    let dup r =
-      let es = CoeffVector.to_sparse_list r in
-      CoeffVector.of_sparse_list (2 * w) (es @ List.map (fun (i, c) -> (i + w, c)) es)
-    in
-    let left r = CoeffVector.of_sparse_list (2 * w) (CoeffVector.to_sparse_list r) in
-    let big = List.fold_left (fun m r ->
-        match Matrix.rref_vec m r with
-        | Some m -> m
-        | None -> m (* unreachable: a contradiction row cannot arise from consistent operands *)
-      ) (Matrix.empty ()) (List.map dup (rows m1) @ List.map left (rows m2))
-    in
-    (* rows with zero left half: their right halves span the intersection *)
-    List.fold_left (fun m r ->
-        match CoeffVector.find_first_non_zero r with
-        | Some (p, _) when p >= w ->
-          let row = CoeffVector.of_sparse_list w
-              (List.map (fun (i, c) -> (i - w, c)) (CoeffVector.to_sparse_list r))
-          in
-          (match Matrix.rref_vec m row with
-           | Some m -> m
-           | None -> m (* unreachable: the hull of nonempty sets is consistent *))
-        | _ -> m
-      ) (Matrix.empty ()) (rows big)
-
-  (** Rewrites an RHS-form row into an equivalent one over program dimensions
-      only, substituting every slack by its defining linear form. Only valid on
-      states where the defining equalities hold. *)
-  let subst_slacks ~(size: int) (infos: info_map) (r: CoeffVector.t) : CoeffVector.t =
-    let rec go r =
-      let entries = CoeffVector.to_sparse_list r in
-      match List.find_opt (fun (i, _) -> i < size && VarMap.mem (Var.to_t i) infos) entries with
-      | None -> r
-      | Some (i, a) ->
-        let beta = Var.to_t i in
-        let info = VarMap.find beta infos in
-        (* r + a * defining_row zeroes the beta entry, since the defining row has -1 there *)
-        let d = defining_row size beta info in
-        go (CoeffVector.map2_f_preserves_zero (fun x y -> x +: a *: y) r d)
-    in
-    go r
-
-  (* ---------------------------------------------------------------------- *)
-  (* Pointwise interval map operations *)
-
-  let join_intervals (a: interval_map) (b: interval_map) : interval_map =
-    VarMap.merge (fun _ x y ->
-        match x, y with
-        | Some x, Some y ->
-          let j = I.join x y in
-          if I.is_top j then None else Some j
-        | _ -> None
-      ) a b
-
-  let widen_intervals ?thresholds (a: interval_map) (b: interval_map) : interval_map =
-    let widen = match thresholds with
-      | Some (lower, upper) -> I.widen_thresholds ~lower ~upper
-      | None -> I.widen
-    in
-    VarMap.filter_map (fun k x ->
-        let w = widen x (get_iv b k) in
-        if I.is_top w then None else Some w
-      ) a
-
-  let narrow_intervals (a: interval_map) (b: interval_map) : interval_map =
-    VarMap.merge (fun _ x y ->
-        match x, y with
-        | Some x, Some y -> Some (I.narrow x y)
-        | Some x, None -> Some x
-        | None, Some y -> Some y
-        | None, None -> None
-      ) a b
-
-  let meet_intervals (a: interval_map) (b: interval_map) : interval_map option =
-    try
-      Some (VarMap.merge (fun _ x y ->
-          match x, y with
-          | Some x, Some y ->
-            (match I.meet x y with
-             | Some r -> Some r
-             | None -> raise Bottom)
-          | Some x, None -> Some x
-          | None, Some y -> Some y
-          | None, None -> None
-        ) a b)
-    with Bottom -> None
-
-  (** [leq_intervals refined_a b]: all interval constraints of [b] are implied
-      by the (already reduced) intervals of [a]. *)
-  let leq_intervals (refined_a: interval_map) (b: interval_map) : bool =
-    VarMap.for_all (fun k iv -> I.leq (get_iv refined_a k) iv) b
-
-  (* ---------------------------------------------------------------------- *)
-  (* Forgetting variables *)
-
   (**
-    [rem_rows_containing_var affeq var] uses [Matrix.reduce_col] and [Matrix.remove_zero_rows]
-    to existentially eliminate the variable from the matrix.
+  TODO: check if this is actually needed. Can a canonical info that is equal to another get a different length vector from dimension changes or other?
+        Also check if the constant is currently in the info, i think it should not be there!
   *)
-  let rem_rows_containing_var (affeq : affeq) (var : Var.t) : affeq =
-    if Matrix.is_empty affeq then affeq
-    else
-      Matrix.remove_zero_rows @@ Matrix.reduce_col affeq (Var.to_int var)
+  let info_equal (a : info) (b : info) : bool = 
+            let rec cmp_entries a_entries b_entries = 
+          match a_entries, b_entries with 
+          | (_, val1) :: r1, _ when val1 = Mpqf.zero -> cmp_entries r1 b_entries
+          | _, (_, val2) :: r2 when val2 = Mpqf.zero -> cmp_entries a_entries r2
+          | (idx1, val1) :: r1, (idx2, val2) :: r2 -> 
+            idx1 = idx2 && Mpqf.equal val1 val2 && cmp_entries r1 r2
+          | [], [] -> true
+          | _ -> false 
+        in
+        cmp_entries (CoeffVector.to_sparse_list a) (CoeffVector.to_sparse_list b)
+  
+  (** Number of slack columns = size of the trailing slack block. Every slack has an
+      interval *)
+  let num_slacks (t: t) = VarMap.cardinal t.intervals
 
+
+  let insert_slack (slack_col: int) (expr: info) (interval: I.t) (t: t) : t =
+    let widen v = CoeffVector.insert_zero_at_indices v [(slack_col, 1)] 1 in
+    let affeq = Matrix.add_empty_columns t.affeq [| slack_col |] in
+    let expr  = widen expr in                                          (* slack col now 0, const shifted right *)
+    let row   = CoeffVector.set_nth expr slack_col (Mpqf.neg Mpqf.one) in (* expr - slack = 0 *)
+    let key   = Var.to_t slack_col in
+    { affeq     = Matrix.append_row affeq row;
+      infos     = VarMap.add key expr (VarMap.map widen t.infos);
+      intervals = VarMap.add key interval t.intervals }
+
+  let add_affeq_row (row: CoeffVector.t) (t: t) =
+    { t with affeq = Matrix.append_row t.affeq row }
+  
+
+  (**[remove_columns dim t compact] is a helper for forget_vars and dim_remove that 
+     forgets about a column and can compact it at the same tims.
+      @param dim represents the dimensions that are forgotten
+      @param t subpolyhedra
+      @param compact determines if the forgotten columns should be compacted to fill the gaps,
+        used for keeping the slack indices small and for dim_remove.
+  *)
+  let remove_columns (dim : int array) (t : t) (compact : bool) : t = 
+    let shift_index_remove (old_index : Var.t) (dim_list : int list) : Var.t = 
+      if compact then old_index - (List.count_matching (fun x -> x < old_index) dim_list) else old_index in
+    let dim_list = List.sort_uniq Int.compare (Array.to_list dim) in 
+    let dim_set = Set.of_list dim_list in
+    let new_affeq = 
+      (if compact then (flip Matrix.del_cols) (Array.of_list dim_list) else identity) 
+      @@ Matrix.remove_zero_rows 
+      @@ List.fold_left (fun acc var -> Matrix.reduce_col acc var) t.affeq dim_list 
+    in
+    let new_intervals = 
+      VarMap.fold 
+        (fun var intv acc -> 
+           if Set.mem var dim_set 
+           then acc 
+           else VarMap.add (shift_index_remove var dim_list) intv acc ) t.intervals VarMap.empty 
+    in
+    let new_infos = 
+      let keep info = List.for_all (fun idx -> CoeffVector.nth info idx =: Mpqf.zero) dim_list in
+      VarMap.fold (fun var info acc ->
+        if Set.mem var dim_set || not (keep info)
+        then acc
+        else 
+          let info = if compact then CoeffVector.remove_at_indices info dim_list else info in
+          VarMap.add (shift_index_remove var dim_list) info acc)
+        t.infos VarMap.empty
+    in
+    {affeq = new_affeq; intervals = new_intervals; infos = new_infos}
+
+    
   (**
-    [forget_vars vars t] forgets a list of variables in the polyhedron:
-    the variables are existentially eliminated from the equality rows and their
-    interval bindings are dropped. Slacks whose info mentions a forgotten
-    variable lose both their info and their interval (their remaining rows are
-    still valid combinations). Callers that can change the environment should
-    remove such dependent slack dimensions entirely.
+    [forget_vars vars t] forgets a list of variables in the polyhedron.
+    For slack variables it compacts the indices such that slack variables indices do not carry gaps.
+    Future TODO: Currently we do Gaussian elimination with the variable as pivot ([Matrix.reduce_col]).
+    This is fine for the affeq, but we do not want to blindly remove any slack variable info containing x
+    from our info_map. Currently this happens, but refinement is needed in the future!
   *)
   let forget_vars (vars: Var.t list) (t: t) =
-    let dependent = VarMap.filter (fun _ info ->
-        List.exists (fun (v, _) -> List.exists (Var.equal v) vars) info.iterms
-      ) t.infos
-    in
-    let new_affeq = List.fold_left rem_rows_containing_var t.affeq vars in
-    let new_intervals = List.fold_left (flip VarMap.remove) t.intervals vars in
-    let new_intervals = VarMap.fold (fun beta _ acc -> VarMap.remove beta acc) dependent new_intervals in
-    let new_infos = VarMap.filter (fun beta _ -> not (VarMap.mem beta dependent)) t.infos in
-    let new_infos = List.fold_left (flip VarMap.remove) new_infos vars in
-    { affeq = new_affeq; intervals = new_intervals; infos = new_infos }
+    let dim_array = Array.of_list vars in
+    match List.partition (flip VarMap.mem t.intervals) vars with 
+    | [], [] -> t
+    | [], _ -> remove_columns dim_array t false
+    | _, [] -> remove_columns dim_array t true
+    | slack_vars, prog_vars -> remove_columns (Array.of_list prog_vars) (remove_columns (Array.of_list slack_vars) t true) false
 
+  
   (**
   [forget_var var t] forgets a single variable using [forget_vars].
   *)
-  let forget_var (var : Var.t) (t: t) : t =
-    forget_vars [var] t
-
-  (* ---------------------------------------------------------------------- *)
-  (* Apron dimension changes *)
-
-  let shift_info (f: Var.t -> Var.t) (info: info) : info =
-    { info with iterms = List.map (fun (v, c) -> (f v, c)) info.iterms }
+  let forget_var (var : Var.t) (t: t) : t = 
+    let compact = VarMap.mem var t.intervals in
+    remove_columns (Array.singleton var) t compact
 
   (**
   [dim_add] Apron dimension change
   *)
-  let dim_add (ch: Apron.Dim.change) (t: t) =
-    let shift_index_add (old_index : Var.t) (occ_cols : (int * int) list) : Var.t =
-      (* find all entries that are less or equal to old_index in occ_cols, and count them (=k), then new_index = old_index + k *)
-      let k = List.fold_left (fun acc (index, count) -> if index <= (Var.to_int old_index) then acc + count else acc) 0 occ_cols in
-      Var.to_t ((Var.to_int old_index) + k)
-    in
+  
+  let dim_add (ch: Apron.Dim.change) (t: t) = 
+    let shift_index_add (old_index : Var.t) (occ_cols : (int * int) list) : Var.t = 
+      (* find all entries that are less or equal to old_index in occ_cols, and count them (=k), then new_index = old_index + k , return new_index *)
+      (let k = List.fold_left (fun acc (index, count) -> if index <= old_index then acc + count else acc) 0 occ_cols
+       in let new_index = old_index + k 
+       in Var.to_t new_index) in
+    let new_infos_add (infos : info_map) occ_cols : info_map = 
+      VarMap.fold(fun var info acc ->
+          let new_var = shift_index_add var occ_cols in
+          let new_info = CoeffVector.insert_zero_at_indices info occ_cols (Array.length ch.dim) in
+          VarMap.add new_var new_info acc) infos VarMap.empty in
+    let new_intervals_add (intervals : interval_map) occ_cols : interval_map = 
+      VarMap.fold( fun var interval acc ->
+          let new_var = shift_index_add var occ_cols in
+          VarMap.add new_var interval acc) intervals VarMap.empty in
     let new_affeq = Matrix.dim_add ch t.affeq in
     let list = Array.to_list ch.dim in
-    let grouped_indices = List.group Int.compare list in
-    let occ_cols = List.map (fun group -> ((List.hd group, List.length group))) grouped_indices in
+    let grouped_indices = List.group Int.compare list in 
+    let occ_cols = List.map (fun group -> 
+      (List.hd group, List.length group)
+      ) grouped_indices 
+    in 
     (* Approach from listMatrix.ml: add_empty_columns; Example: cols_list = [1; 3; 3; 5] -> grouped_indices = [[1]; [3; 3]; [5]] -> occ_cols = [(1, 1); (3, 2); (5, 1)] *)
-    let shift v = shift_index_add v occ_cols in
-    let new_infos =
-      VarMap.fold (fun var info acc -> VarMap.add (shift var) (shift_info shift info) acc) t.infos VarMap.empty in
-    let new_intervals =
-      VarMap.fold (fun var interval acc -> VarMap.add (shift var) interval acc) t.intervals VarMap.empty in
+    let new_infos = new_infos_add t.infos occ_cols in 
+    let new_intervals = new_intervals_add t.intervals occ_cols in
     {affeq = new_affeq; infos = new_infos; intervals = new_intervals}
 
   (**
   [dim_remove] Apron dimension change
   *)
-  let dim_remove (ch: Apron.Dim.change) (t: t) =
-    let shift_index_remove (old_index : Var.t) (dim_list : int list) : Var.t =
-      let k = List.fold_left (fun acc index -> if index < (Var.to_int old_index) then acc + 1 else acc) 0 dim_list in
-      Var.to_t ((Var.to_int old_index) - k)
-    in
-    let new_affeq = Matrix.dim_remove ch t.affeq in
-    let dim_list = Array.to_list ch.dim in
-    let new_t = forget_vars (List.map Var.to_t dim_list) t in
-    let dim_list = List.sort_uniq Int.compare dim_list in (* remove duplicates *)
-    let shift v = shift_index_remove v dim_list in
-    let new_infos =
-      VarMap.fold (fun var info acc -> VarMap.add (shift var) (shift_info shift info) acc) new_t.infos VarMap.empty in
-    let new_intervals =
-      VarMap.fold (fun var interval acc -> VarMap.add (shift var) interval acc) new_t.intervals VarMap.empty in
-    {affeq = new_affeq; infos = new_infos; intervals = new_intervals}
-
-  (* ---------------------------------------------------------------------- *)
-  (* Structural invariant checking (for tests and debugging) *)
-
-  (** Checks the structural invariants of a state and returns a human-readable
-      message per violation; an empty list means all invariants hold.
-      [is_slack] classifies dimensions into slack and program dimensions.
-
-      Checked invariants:
-      - the matrix is in rref: rows of length [size + 1] without zero or
-        contradiction rows, pivots are 1 with strictly increasing positions,
-        and every pivot column is zero in all other rows;
-      - infos are keyed by slack dimensions and mention only in-range program
-        dimensions, with strictly sorted, nonzero terms;
-      - the defining row of every slack is implied by the matrix;
-      - intervals are keyed by in-range dimensions and are non-empty. *)
-  let invariant_violations ~(size: int) ~(is_slack: Var.t -> bool) (t: t) : string list =
-    let violations = ref [] in
-    let add fmt = Printf.ksprintf (fun s -> violations := s :: !violations) fmt in
-    let rs = rows t.affeq in
-    List.iteri (fun i r ->
-        if CoeffVector.length r <> size + 1 then
-          add "row %d has length %d, expected %d" i (CoeffVector.length r) (size + 1)
-      ) rs;
-    let pivots = List.mapi (fun i r -> (i, CoeffVector.find_first_non_zero r)) rs in
-    List.iter (fun (i, p) ->
-        match p with
-        | None -> add "row %d is a zero row" i
-        | Some (p, pv) ->
-          if p >= size then add "row %d is a contradiction row" i
-          else if pv <>: Mpqf.one then add "row %d has pivot value %s, expected 1" i (Mpqf.to_string pv)
-      ) pivots;
-    let rec check_increasing = function
-      | (i, Some (p, _)) :: (((_, Some (q, _)) :: _) as rest) ->
-        if p >= q then add "pivot of row %d is not left of the next row's pivot" i;
-        check_increasing rest
-      | _ :: rest -> check_increasing rest
-      | [] -> ()
-    in
-    check_increasing pivots;
-    List.iter (fun (i, p) ->
-        match p with
-        | Some (p, _) when p < size ->
-          List.iteri (fun j r ->
-              if j <> i && CoeffVector.nth r p <>: Mpqf.zero then
-                add "pivot column %d of row %d is nonzero in row %d" p i j
-            ) rs
-        | _ -> ()
-      ) pivots;
-    VarMap.iter (fun beta info ->
-        let b = Var.string_of beta in
-        if Var.to_int beta >= size then add "info key %s is out of range" b;
-        if not (is_slack beta) then add "info key %s is not a slack dimension" b;
-        if info.iterms = [] then add "info of %s has no terms" b;
-        List.iter (fun (v, c) ->
-            if Var.to_int v >= size then add "info of %s mentions out-of-range dimension %s" b (Var.string_of v);
-            if is_slack v then add "info of %s mentions slack dimension %s" b (Var.string_of v);
-            if c =: Mpqf.zero then add "info of %s has a zero coefficient for %s" b (Var.string_of v)
-          ) info.iterms;
-        let rec sorted = function
-          | (v, _) :: (((w, _) :: _) as rest) -> Var.compare v w < 0 && sorted rest
-          | _ -> true
-        in
-        if not (sorted info.iterms) then add "info terms of %s are not strictly sorted" b;
-        if Var.to_int beta < size && not (row_implied_by t.affeq (defining_row size beta info)) then
-          add "defining row of %s is not implied by the matrix" b
-      ) t.infos;
-    VarMap.iter (fun v iv ->
-        if Var.to_int v >= size then add "interval on out-of-range dimension %s" (Var.string_of v)
-        else
-          match I.bounds iv with
-          | Some l, Some u when Q.compare l u > 0 -> add "interval of %s is empty: %s" (Var.string_of v) (I.show iv)
-          | _ -> ()
-      ) t.intervals;
-    List.rev !violations
-
-  (* ---------------------------------------------------------------------- *)
-  (* Printing *)
+  let dim_remove (ch : Apron.Dim.change) (t : t) = 
+    remove_columns ch.dim t true
 
   let string_of_interval_map (m: interval_map) =
-    VarMap.bindings m
-    |> List.map (fun (var, interval) -> Var.string_of var ^ " -> " ^ I.show interval)
-    |> String.concat "; "
+  VarMap.bindings m
+  |> List.map (fun (var, interval) ->
+      Printf.sprintf "%s -> %s" (Var.string_of var) (I.show interval))
+  |> String.concat ";\n    " 
 
-  let string_of_info (e: info) =
-    let terms =
-      e.iterms
-      |> List.map (fun (v, c) -> Mpqf.to_string c ^ "*" ^ Var.string_of v)
-      |> String.concat " + "
+let string_of_infos (infos: info_map) = 
+  VarMap.bindings infos
+  |> List.map (fun (var, info) ->
+      Printf.sprintf "%s -> %s" (Var.string_of var) (CoeffVector.show info))
+  |> String.concat ";\n    "
+
+let string_of (t: t) =
+  Printf.sprintf 
+    "{\n  affeq =\n    %s;\n  intervals =\n    [\n    %s\n    ];\n  slacks =\n    [\n    %s\n    ]\n}"
+    (Matrix.show t.affeq)
+    (string_of_interval_map t.intervals)
+    (string_of_infos t.infos)
+  
+
+  (** Raised internally when the LP built from an abstract state is inconsistent, *)
+  exception Infeasible
+
+  (** A non-strict solver bound (we carry no explanations). *)
+  let lp_bound (v: Mpqf.t) : Core.bound = { Core.bvalue = Core.R2.of_r v; explanation = () }
+
+  (** [assert_row (env, i) row] asserts a matrix row [a_1*v_1 + ... + a_k*v_k + c = 0]
+      as [sum in [-c, -c]] in the solver. Multi-variable rows are registered under the
+      fresh negative handle [-(i+1)]. single-variable rows must use [Assert.var] instead
+      ([Assert.poly] requires >= 2 variables). *)
+  let assert_row ((env, i): Core.t * int) (row: CoeffVector.t) : Core.t * int =
+    (* Get index of the constant term *)
+    let const_idx = CoeffVector.length row - 1 in
+
+    (* partition into coefficients cand consts *)
+    let coeffs, consts = List.partition (fun (j, _) -> j <> const_idx) (CoeffVector.to_sparse_list row) in
+
+    (* get the const from the row *)
+    let c = match consts with [] -> Mpqf.zero | (_, c) :: _ -> c in
+
+    match coeffs with
+    | [] -> if c =: Mpqf.zero then (env, i) else raise Infeasible (* row reads 0 = c with c <> 0 *)
+    | [(j, a)] ->
+      (* We only have one coefficient (for some reason poly is 2 or more coefficients) 
+      add degenerate interval to simplex *)
+      let b = lp_bound (Mpqf.neg c /: a) in (* a*v_j + c = 0  <=>  v_j = -c/a *)
+      (fst @@ Assert.var env ~min:b ~max:b j, i)
+    | _ ->
+      (* insert equation with equality *)
+      let b = lp_bound (Mpqf.neg c) in
+      (fst @@ Assert.poly env (Core.P.from_list coeffs) ~min:b ~max:b (-(i + 1)), i + 1)
+
+  (** [assert_interval var intv env] asserts the finite bounds of [intv] on [var]. *)
+  let assert_interval (var: Var.t) (intv: I.t) (env: Core.t) : Core.t =
+    (* if interval has bounds, then insert *)
+    match I.bounds intv with
+    | None, None -> env
+    | lower, upper -> fst @@ Assert.var env ?min:(Option.map lp_bound lower) ?max:(Option.map lp_bound upper) (Var.to_int var)
+
+  (** [optimize env col coeff] is the optimum of [coeff * v_col]: [Some m] is the exact
+      maximum, [None] means unbounded. A strict optimum [m - eps] is reported with value
+      [m], which is still a sound bound. Raises [Infeasible] on an inconsistent system. *)
+  let optimize (env: Core.t) (terms : (int * Mpqf.t) list) : Core.t * Mpqf.t option =
+    let env, opt = Solve.maximize env (Core.P.from_list terms) in
+    match Result.get opt env with
+    | Core.Max (mx, _) -> env, Some (Lazy.force mx).Core.max_v.Core.bvalue.Core.R2.v
+    | Core.Unbounded _ -> env, None
+    | Core.Unsat _ -> raise Infeasible
+    | Core.Sat _ | Core.Unknown -> env, None (* no bound information: keep the old interval *)
+
+  (** [refine_interval var intv (env, acc)] meets [intv] with the tightest bounds the
+      solver can derive for [var] and adds the result to [acc]. *)
+  let refine_interval (var: Var.t) (intv: I.t) ((env, acc): Core.t * interval_map) : Core.t * interval_map =
+    (* get collumn to refine *)
+    let col = Var.to_int var in
+
+    (* optimze to get upper and lower *)
+    let env, upper = optimize env [(col, Mpqf.one)] in
+    let env, neg_lower = optimize env [(col, Mpqf.mone)] in
+
+    (* revert negation trick *)
+    let lower = Option.map Mpqf.neg neg_lower in
+
+    (* meet with old interval to get the new bounds for the new interval *)
+    match I.meet intv (I.of_bounds ~lower ~upper) with
+    | None -> raise Infeasible
+    | Some intv' -> (env, VarMap.add var intv' acc)
+
+
+  let lp_of (t : t) : Core.t option = 
+    try
+      let env = Core.empty ~is_int:false ~check_invs:false in
+
+      (* Add rows and intervals *)
+      let env, _ = Matrix.fold_left assert_row (env, 0) t.affeq in
+      let env = VarMap.fold assert_interval t.intervals env in
+
+      (* Feasibility check up front: bottom must be detected even when [t.intervals] is
+         empty and the refine fold below consequently never queries the solver. *)
+      match Result.get None (Solve.solve env) with
+      | Core.Unsat _ -> None
+      | _ -> Some env
+    with Infeasible -> None
+
+  (** [reduce t] is the LP-based redu
+      after normalizing the matrix (rref), for every variable with an interval it computes, via simplex, 
+      the tightest bounds implied by the affine equalities together with all other interval bounds, and meets
+      them with the stored interval. 
+      Returns [None] iff the constraint system is infeasible, i.e. the state is bottom.
+        
+      The algorithm is basically, Setup the simplex, make one run to make sure we are feasable,
+      if feasable, complete run, update all intervals and return new domain. If infeasable, return none
+    *)
+  let reduce (t: t) : t option =
+    try
+      if Matrix.is_empty t.affeq then Some t (* no equalities: nothing to propagate *)
+      else begin
+        match Matrix.normalize t.affeq with
+        | None -> None (* inconsistent equalities *)
+        | Some mat ->
+          (* T is now normalized matrix *)
+          let t = { t with affeq = mat } in
+          match lp_of t with
+          | None -> None
+          | Some env ->
+          (* Update the domain if we are feasable.*)
+          let _, new_intervals = VarMap.fold refine_interval t.intervals (env, VarMap.empty) in
+          Some { t with intervals = new_intervals }
+      end
+    with Infeasible -> None
+
+
+  (**
+     [slack_lce a b] takes two subpolyhedra [a] and [b] and maps the slack variables into a common environment based on the info field.
+     - we assume that infos in the info map are canonicalized to check equality.
+  *)
+  let slack_lce a b = 
+    (*[find_next_slack_idx (map_a, map_b)] finds the next free index in the shared slack variable space of a and b.*)
+    let find_next_slack_idx (map_a, map_b) =
+      if IntMap.is_empty map_a && IntMap.is_empty map_b 
+      then match VarMap.min_binding_opt a.intervals, VarMap.min_binding_opt b.intervals with 
+        | Some (ka, _), Some (kb, _) -> Int.min ka kb
+        | Some (k, _), None | None, Some (k, _) -> k
+        | None, None ->   (max (Matrix.num_cols a.affeq) (Matrix.num_cols b.affeq)) - 1
+           (* - 1 because we add + 1 for the length calc later in this case, max because one matrix might not have rows.*)
+      else let update_maximum_idx _ v m = max v m in (*find the smallest index that is available: *)
+        (IntMap.fold update_maximum_idx map_b @@ IntMap.fold update_maximum_idx map_a 0) + 1
     in
-    if e.iconst =: Mpqf.zero then terms
-    else terms ^ " + " ^ Mpqf.to_string e.iconst
+    (*[get_mapping a b] finds a slack variable mapping from subpolyhedra a and b into a shared space. *)
+    let get_mapping (a : t) (b : t) = 
+      (**[find_key_on_info map info] searches a VarMap [map] for the first occurence of [info] and returns an [Option (key * value)] 
+         - TODO: probably inefficient as we iterate through both maps entirely to find the maximum. *)
+      let find_key_on_info map info = Seq.find (fun (_, v) -> info_equal v info) @@ VarMap.to_seq map in
+      (*[process_a a b] iterates through a's slack vars and finds mappings into the shared space. All shared slacks are found here.*)
+      let process_a a b : (int IntMap.t * int IntMap.t) = 
+        VarMap.fold (fun var info ((a_map, b_map) as acc) ->
+            let new_var = find_next_slack_idx acc in
+            match find_key_on_info b.infos info with
+            | None -> (IntMap.add var new_var a_map, b_map)
+            | Some (k, v) -> (IntMap.add var new_var a_map, IntMap.add k new_var b_map)) 
+          a.infos (IntMap.empty, IntMap.empty) 
+      in
+      (*[process_b b current_mappings] finds mappings for the slack vars of b not shared with a. Applied after [process_a]. *)
+      let process_b b current_mappings = 
+        VarMap.fold (fun var info ((a_map, b_map) as acc)-> 
+            if IntMap.mem var b_map then acc else (a_map, IntMap.add var (find_next_slack_idx acc) b_map)) b.infos current_mappings in
+      process_b b @@ process_a a b  (* end of get_mapping!*)
+    in
+    (* [remap_vector_sparse] maps a Coefficient vector based on the mapping provided. For elements in the vector 
+       not present in the mapping, the index remains the same. The constant is then reinserted at the end if present.
+    *)
+    let remap_vector_sparse (vec : CoeffVector.t) (mapping : int IntMap.t) (len : int): CoeffVector.t = 
+      (*TODO: take care of constant if it exists!*)
+      let const = CoeffVector.nth vec ((CoeffVector.length vec) - 1) in
+      let helper acc (v, c) = 
+        let new_var = if IntMap.mem v mapping then IntMap.find v mapping else (if v = (CoeffVector.length vec) - 1 then len - 1 else v) in
+        CoeffVector.set_nth acc new_var c in
+      let res = List.fold_left helper (CoeffVector.of_sparse_list len []) (CoeffVector.to_sparse_list vec) in
+      if const = Mpqf.zero then res else CoeffVector.set_nth res ((CoeffVector.length res) - 1) const 
+    in
+    (*[remap_slacks a mapping const_idx] remaps the slack variables of a subpolyhedra a using the mapping from [get_mapping a b]. *)
+    let remap_slacks (a : t) (mapping : int IntMap.t) (len : int) : t =
+      let new_infos =
+        let helper (var : int) (info : CoeffVector.t) (acc : info VarMap.t) =
+          let mapped_var = IntMap.find var mapping in
+          let new_info = remap_vector_sparse info mapping len in
+          VarMap.add mapped_var new_info acc in
+        VarMap.fold helper a.infos VarMap.empty in
+      let new_intervals =
+        VarMap.fold (fun var intv acc -> VarMap.add (IntMap.find var mapping) intv acc) a.intervals VarMap.empty in
+      let new_affeq  = Matrix.map (fun row -> remap_vector_sparse row mapping len) a.affeq in 
+      {affeq = new_affeq; intervals = new_intervals; infos = new_infos} in
+    (*Remove slacks that have no info because they cannot be kept in the join:*)
+    let a_with_slacks_removed = forget_vars (VarMap.fold (fun var _ acc -> if not @@ VarMap.mem var a.infos then var :: acc else acc) a.intervals []) a in 
+    let b_with_slacks_removed = forget_vars (VarMap.fold (fun var _ acc -> if not @@ VarMap.mem var b.infos then var :: acc else acc) b.intervals []) b in 
+    let (a_mapping, b_mapping) = get_mapping a_with_slacks_removed b_with_slacks_removed in
+    let len = (find_next_slack_idx (a_mapping, b_mapping)) + 1 in
+    let a_remapped = remap_slacks a_with_slacks_removed a_mapping len in
+    let b_remapped = remap_slacks b_with_slacks_removed b_mapping len in
+    (a_remapped, b_remapped)
 
-  let string_of_infos (infos: info_map) =
-    VarMap.bindings infos
-    |> List.map (fun (var, info) -> Var.string_of var ^ " -> " ^ string_of_info info)
-    |> String.concat "; "
+  (**
+      [inject_slack_for_join (a, b)] 
+      For every slack variable in {b b} but not in {b a} we insert:
+      - {i info - slack_var} into  {b a.affeq}
+      - {i slack_var -> info} into {b a.infos}
+      - {i slack_var -> [None, None]} into {b a.intervals}
 
-  let string_of (t: t) =
-    "{ affeq = " ^ Matrix.show t.affeq
-    ^ "; intervals = [" ^ string_of_interval_map t.intervals ^ "]"
-    ^ "; slacks = [" ^ string_of_infos t.infos ^ "] }"
+      Vice versa for slack variables in {b a} but not in {b b}.
+      Prior to this [slack_lce] must be called so that a and b share the same indices for slacks.
+  *)
+  let inject_slack_for_join (a, b) = 
+    let inject_slack var info x = 
+      let new_intervals = VarMap.add var I.top x.intervals in
+      let new_infos = VarMap.add var info x.infos in
+      let new_affeq = Matrix.append_row x.affeq (CoeffVector.set_nth info var (Mpqf.of_int (-1))) in
+      {affeq = new_affeq; infos = new_infos; intervals = new_intervals} in
+    let new_a = VarMap.fold (fun var info acc -> if VarMap.mem var a.infos then acc else inject_slack var info acc ) b.infos a in
+    let new_b = VarMap.fold (fun var info acc -> if VarMap.mem var b.infos then acc else inject_slack var info acc) a.infos b in
+    (new_a, new_b)
+
+  let inject_slack_for_widen (a, b) = 
+    let inject_slack var info x = 
+      let new_intervals = VarMap.add var I.top x.intervals in
+      let new_infos = VarMap.add var info x.infos in
+      let new_affeq = Matrix.append_row x.affeq (CoeffVector.set_nth info var (Mpqf.of_int (-1))) in
+      {affeq = new_affeq; infos = new_infos; intervals = new_intervals} in
+    (*let new_a = VarMap.fold (fun var info acc -> if VarMap.mem var a.infos then acc else inject_slack var info acc ) b.infos a in*)
+    let new_b = VarMap.fold (fun var info acc -> if VarMap.mem var b.infos then acc else inject_slack var info acc) a.infos b in
+    (a, new_b)
+
+  (**
+  [interval_join a b] takes two interval_maps and joins them using [RationalInterval.join].
+  QUESTION: How do we represent bottom in the interval domain? 
+  *)
+  let interval_join (a : interval_map) (b : interval_map) : interval_map = 
+    VarMap.union (fun (key : Var.t) (v1 : I.t) (v2 : I.t) -> Some (I.join v1 v2)) a b
+  
+  (**
+  [interval_widen a b] takes two interval_maps and widens them using [RationalInterval.widen].
+  QUESTION: How do we represent bottom in the interval domain? 
+  *)
+  let interval_widen (a : interval_map) (b : interval_map) : interval_map = 
+    VarMap.merge (fun (key : Var.t) (v1 : I.t option) (v2 : I.t option) -> 
+      match v1, v2 with 
+      | None, _ | _, None -> None
+      | Some v1', Some v2' -> Some (I.widen v1' v2')) a b
+   
+  (**[join a b] returns a subpolyhedra resulting from the join of two subpolyhedras a and b.
+    We assume that the info fields of slack variables are canonical. 
+    Slack variables with an interval bound but no info field are discarded, as they cannot be matched
+    with slack variables from the other state.
+  *)
+  let join (a: t) (b: t) : t option =
+    let (remapped_a, remapped_b) = inject_slack_for_join @@ slack_lce a b in
+    let new_a = reduce remapped_a in
+    let new_b = reduce remapped_b in
+    match new_a, new_b with
+    | None, None -> None
+    | None, _ -> new_b
+    | _, None -> new_a
+    | Some x, Some y ->
+    let new_intervals = interval_join x.intervals y.intervals in
+    let new_affeq = Matrix.linear_disjunct x.affeq y.affeq in
+    Some {affeq = new_affeq; intervals = new_intervals; infos = x.infos}
+
+  let recover_def_from_non_info_intv (var : int) (subpoly : t) : info option=
+    let only_prog_vars v  = List.for_all (fun (idx, _) -> (not @@ (VarMap.mem idx subpoly.intervals)) || (idx = var)) (CoeffVector.to_sparse_list v) in
+    match Matrix.find_opt (fun vec -> ((CoeffVector.nth vec var) <>: Mpqf.zero) && only_prog_vars vec) subpoly.affeq with 
+    | None -> None
+    | Some vec ->
+      let coeff = CoeffVector.nth vec var in
+      Some (CoeffVector.map (fun (i, c) -> (i, Mpqf.neg (c /: coeff))) (CoeffVector.set_nth vec var Mpqf.zero))
+  
+  let non_info_entailment a b (non_info : int list) =
+    if List.is_empty non_info then true else 
+    match lp_of a with 
+    | None -> true (*a is bottom and therefore leq to b.*)
+    | Some env -> 
+      List.for_all (fun orph ->
+        match recover_def_from_non_info_intv orph b with 
+        | None -> false 
+        | Some info -> 
+          let info_const = CoeffVector.nth info (CoeffVector.length info - 1) in
+          let info_terms = CoeffVector.to_sparse_list (CoeffVector.set_nth info (CoeffVector.length info - 1) Mpqf.zero) in
+          let upper = optimize env info_terms |> snd |> Option.map (fun m -> m +: info_const) in
+          let lower = optimize env (List.map (fun (i, c) -> (i, Mpqf.neg c)) info_terms) |> snd |> Option.map (fun m -> info_const -: m) in
+          I.leq (I.of_bounds ~lower ~upper) (VarMap.find orph b.intervals)) non_info
+  (**
+  [leq a b]
+  TODO: Matrix needs to be in rref!
+  *)
+  let leq (a: t) (b: t) =
+    let collect_top(x : t) = 
+      VarMap.fold (fun var intv acc -> 
+          if I.is_top intv 
+          then var :: acc 
+          else acc ) x.intervals []
+    in
+    let collect_non_info (x : t) = 
+      VarMap.fold (fun var intv acc ->
+          if (not @@ VarMap.mem var x.infos) && not (I.is_top intv)
+          then var :: acc
+          else acc) x.intervals []
+    in
+    match reduce a, reduce b with (*reduce here needed unfortunately. Invalid widen otherwise.*)
+    | None, _ -> true
+    | _, None -> false
+    | Some a, Some b ->
+    let processed_a = forget_vars (collect_top a @ collect_non_info a) a in
+    let b_non_info = collect_non_info b in
+    if not @@ non_info_entailment a b b_non_info then false else
+    let processed_b = forget_vars (collect_top b @ b_non_info) b in
+    let (a_common, b_common) = slack_lce processed_a processed_b in
+    VarMap.for_all (fun v k -> 
+      match VarMap.find_opt v b_common.infos with 
+      | Some k' -> info_equal k' k
+      | None -> false) a_common.infos
+    && VarMap.for_all (fun k v -> 
+      match VarMap.find_opt k b_common.intervals with 
+      | Some v' -> I.leq v v'
+      | None -> false) a_common.intervals
+    && Matrix.is_covered_by b_common.affeq a_common.affeq
+    
+  (** [meet a b] returns a subpolyhedra resulting from the meet of two subpolyhedras a and b.
+      We assume that the info fields of slack variables are canonical. 
+      Slack variables with an interval bound but no info field are discarded, as they cannot be matched
+      with slack variables from the other state.
+  *)
+
+  (** [interval_meet a b] returns the meet of two interval maps. 
+  In case some of the intervals are disjoint, it returns None, indicating that the meet is bottom.
+   *)
+  let interval_meet (a : interval_map) (b : interval_map) : interval_map option = 
+    let exception Bot in
+    try
+      Some (VarMap.union (
+        fun (key : Var.t) (v1 : I.t) (v2 : I.t) -> (match I.meet v1 v2 with
+            | None -> raise Bot
+            | Some i -> Some i)
+        ) a b)
+    with Bot -> None
+   
+  let meet (a: t) (b: t) = 
+    let (new_a, new_b) = slack_lce a b in
+    match Matrix.normalize new_a.affeq, Matrix.normalize new_b.affeq with 
+    | None, _  | _, None -> None
+    | Some x, Some y ->
+      match interval_meet new_a.intervals new_b.intervals with
+      | None -> None
+      | Some new_intervals -> 
+        match Matrix.rref_matrix x y with (* Matrix ist dann in der richtigen Form *)
+        | None -> None
+        | Some new_affeq -> 
+          let new_infos = VarMap.union (fun _ i1 i2 -> if info_equal i1 i2 then Some i1 else failwith "inconsistent slack mapping") new_a.infos new_b.infos in
+          Some {affeq = new_affeq; intervals = new_intervals; infos = new_infos}
+
+
+  let widen a b =
+    let (remapped_a, remapped_b) = inject_slack_for_widen @@ slack_lce a b in
+    (*let new_a = reduce remapped_a in*)
+    let norm_a = Matrix.normalize remapped_a.affeq in
+    let new_a = match norm_a with 
+      | None -> None
+      | Some x -> Some {remapped_a with affeq = x} in
+    let new_b = reduce remapped_b in
+    match new_a, new_b with
+    | None, None -> None
+    | None, _ -> new_b
+    | _, None -> new_a
+    | Some x, Some y ->
+    let new_intervals = interval_widen x.intervals y.intervals in
+    let new_affeq = Matrix.linear_disjunct x.affeq y.affeq in
+    let lost_vars = Array.of_enum @@ VarMap.keys @@ VarMap.filter (fun v _ -> not (VarMap.mem v new_intervals)) y.intervals in
+    Some (remove_columns lost_vars {affeq = new_affeq; intervals = new_intervals; infos = x.infos} true)
+
+  let narrow = meet
+  let unify = meet
+
+  let _ = Var.string_of (* silence unused-functor-arg warning until Var is actually used *)
 end

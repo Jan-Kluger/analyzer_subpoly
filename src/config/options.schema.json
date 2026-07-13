@@ -976,12 +976,12 @@
           },
           "additionalProperties": false
         },
-        "subpoly": {
-          "title": "ana.subpoly",
+        "subpoly_fable": {
+          "title": "ana.subpoly_fable",
           "type": "object",
           "properties": {
             "basis-exploration": {
-              "title": "ana.subpoly.basis-exploration",
+              "title": "ana.subpoly_fable.basis-exploration",
               "description":
                 "Strengthen the reduction of the subpolyhedra domain by basis exploration with the linear explorer (rho_BE with delta_L of the SubPolyhedra paper), on top of the plain interval propagation through the equality rows.",
               "type": "boolean",
@@ -2142,12 +2142,12 @@
           },
           "additionalProperties": false
         },
-        "subpoly": {
-          "title": "dbg.subpoly",
+        "subpoly_fable": {
+          "title": "dbg.subpoly_fable",
           "type": "object",
           "properties": {
             "check-invariants": {
-              "title": "dbg.subpoly.check-invariants",
+              "title": "dbg.subpoly_fable.check-invariants",
               "description": "Check the structural invariants of the subpolyhedra domain after every domain operation and fail on violation.",
               "type": "boolean",
               "default": false
