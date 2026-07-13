@@ -232,3 +232,4 @@ solves the deeper stale-info problem.
   info as `x+y` — dedup/join matching misses them (precision only).
 - Hints (paper Step 3 join/widen recovery, threshold widening) are not yet
   implemented — that is the `hints_` part of this branch's name.
+- meet tcons never reduces?
