@@ -93,6 +93,14 @@ module Linexpr_managment = struct
 
   let negate v = CoeffVector.map_f_preserves_zero Mpqf.neg v
 
+  (** [to_single_var_opt v] is [Some (col, a, c)] iff [v] describes [a*x_col + c] with
+      [a <> 0], i.e. the expression mentions exactly one variable. *)
+  let to_single_var_opt (v: linexpr) : (int * Mpqf.t * Mpqf.t) option =
+    let const_idx = CoeffVector.length v - 1 in
+    match List.partition (fun (j, _) -> j <> const_idx) (CoeffVector.to_sparse_list v) with
+    | [(col, a)], consts -> Some (col, a, match consts with [] -> Mpqf.zero | (_, c) :: _ -> c)
+    | _ -> None
+
   (* if one of them is a constant, then multiply. Otherwise, the expression is not linear, return None *)
 (** [multiply], multiplies two [linexpr]s. Return s Some [value] iff. exactly one of the two [linexpr]s is a constant.*)
   let multiply (a : linexpr) (b : linexpr) =
@@ -219,7 +227,10 @@ module ExpressionBounds: (SharedFunctions.ConvBounds with type t = VarManagement
            refined interval needs no shifting. The temporary state is discarded. *)
 
         let slack_col = Environment.size t.env + SubPolyDomain.num_slacks d in
-        let* d' = SubPolyDomain.reduce (SubPolyDomain.insert_slack slack_col v RationalInterval.top d) in
+        (* only the temporary slack's interval is read back, so only that column needs
+           refining -- a full reduce would run 2 LP optimizations per stored interval *)
+        let* d' = SubPolyDomain.reduce ~mode:(SubPolyDomain.Refine_cols [slack_col])
+            (SubPolyDomain.insert_slack slack_col v RationalInterval.top d) in
         let lower, upper = RationalInterval.bounds (SubPolyDomain.VarMap.find slack_col d'.intervals) in
         Some (Option.map z_ceil lower, Option.map z_floor upper)
     in
@@ -373,6 +384,48 @@ same indices. Then it calls SubPolyDomain.widen on the updated subpolyhedra. Ada
       let row = CoeffVector.set_nth coeffvector v (Mpqf.neg Mpqf.one) in (* -x zur linexpr hinzufügen; x = linexpr --> 0 = linexpr - x*)
       { t with d = Some (SubPolyDomain.add_affeq_row row d) } 
 
+(* reduce in meet tcons *)
+  (** Bottom check + canonicalization after adding a constraint. This must stay a FULL
+      reduce: storing unreduced states makes the solver's fixpoint iteration diverge
+      (join/widen then compare loose vs. tightened bounds and the values never
+      stabilize -- observed as an infinite +1 bound creep on [while (i < n) i++]).
+      The cost is bounded by the [reduced] flag: a state is fully reduced at most once,
+      and the single-variable fast path below skips this entirely for re-asserted
+      unchanged bounds (the type-bounds common case). *)
+  let reduce_to_bot (t: t) : t =
+    match t.d with
+    | None -> t
+    | Some d ->
+      match SubPolyDomain.reduce d with
+      | None -> bot_env
+      | Some d' -> { t with d = Some d' }
+
+  (** [meet_single_var_constraint t col a c expr_interval] handles the constraint
+      [a*x_col + c ∈ expr_interval] without materializing a slack: it is just an
+      interval bound on the variable's own column. This is the fast path for type
+      bounds (INT_MIN <= x <= INT_MAX), which RelationAnalysis re-asserts after every
+      assignment -- re-asserting an unchanged bound costs nothing here, while the slack
+      path paid a full LP reduce each time. *)
+  let meet_single_var_constraint (t: t) (col: int) (a: Mpqf.t) (c: Mpqf.t)
+      (expr_interval: RationalInterval.t) : t =
+    match t.d with
+    | None -> t
+    | Some d ->
+      (* a*x + c ∈ I  <=>  x ∈ (I - c) / a  (scale flips the bounds for a < 0) *)
+      let x_interval = RationalInterval.scale (Mpqf.one /: a) (RationalInterval.add_const (Mpqf.neg c) expr_interval) in
+      let old = SubPolyDomain.get_var_intv col d in
+      let met = match old with
+        | None -> Some x_interval
+        | Some o -> RationalInterval.meet o x_interval
+      in
+      match met with
+      | None -> bot_env
+      | Some m when (match old with Some o -> RationalInterval.equal o m | None -> false) ->
+        t (* bound unchanged: nothing new, skip even the feasibility check *)
+      | Some m ->
+        reduce_to_bot { t with d = Some (SubPolyDomain.set_var_intv col m d) }
+
+
   (** [substitute_expr t assigned_dim rhs] is the transfer function for the invertible
       assignment [x := rhs] where [x] is the variable at column [assigned_dim] and
       occurs in [rhs] with nonzero coefficient. *)
@@ -404,8 +457,24 @@ same indices. Then it calls SubPolyDomain.widen on the updated subpolyhedra. Ada
            which re-canonicalizes *)
         let stale, kept = SubPolyDomain.VarMap.partition (fun _ info -> not (CoeffVector.nth info assigned_dim =: Mpqf.zero)) d.infos in
 
+        (* the direct bound of the assigned variable: for x := a*x + c it transforms
+           exactly (new x = a*old_x + c); any rhs involving other variables invalidates
+           it, so drop it (sound: missing key = unbounded) *)
+        let new_var_intervals =
+          match SubPolyDomain.VarMap.find_opt assigned_dim d.var_intervals with
+          | None -> d.var_intervals
+          | Some old_intv ->
+            match to_single_var_opt rhs with
+            | Some (col, a, c) when col = assigned_dim ->
+              SubPolyDomain.VarMap.add assigned_dim
+                (RationalInterval.add_const c (RationalInterval.scale a old_intv)) d.var_intervals
+            | _ -> SubPolyDomain.VarMap.remove assigned_dim d.var_intervals
+        in
+
         (* Make enw domain with kept infos *)
-        let t = { t with d = Some { d with affeq = SubPolyDomain.Matrix.map substitute_in d.affeq; infos = kept } } in
+        let t = { t with d = Some { d with affeq = SubPolyDomain.Matrix.map substitute_in d.affeq;
+                                           infos = kept; var_intervals = new_var_intervals;
+                                           reduced = false } } in
         
         (* Now add new intervals. Walk over stale intervals, and re add, this is the value to return *)
         SubPolyDomain.VarMap.fold (fun svar info t ->
@@ -420,7 +489,12 @@ same indices. Then it calls SubPolyDomain.widen on the updated subpolyhedra. Ada
               let delta = Environment.size t.env + SubPolyDomain.num_slacks d_cur + 1 - CoeffVector.length info' in
               let info' = if delta = 0 then info'
                 else CoeffVector.insert_zero_at_indices info' [(CoeffVector.length info' - 1, delta)] delta in
-              add_slack_constraint t info' interval) stale t
+              (* a substituted definition can collapse to a single variable: then it is
+                 a plain interval bound, not a relational fact needing a slack *)
+              match to_single_var_opt info' with
+              | Some (col, a, c) when col < Environment.size t.env ->
+                meet_single_var_constraint t col a c interval
+              | _ -> add_slack_constraint t info' interval) stale t
 
   let assign_texpr (t: VarManagement.t) var texp =
     match t.d with
@@ -486,15 +560,6 @@ same indices. Then it calls SubPolyDomain.widen on the updated subpolyhedra. Ada
   (*< Copy-pasted from ltve >*)
   let cil_exp_of_lincons1 = Convert.cil_exp_of_lincons1
 
-(* reduce in meet tcons *)
-  let reduce_to_bot (t: t) : t =
-    match t.d with
-    | None -> t
-    | Some d ->
-      match SubPolyDomain.reduce d with
-      | None -> bot_env
-      | Some d' -> { t with d = Some d' }
-
   (* tried to adapt something from LTVE, dont quite get what is, to my understandinf its checking if some expr holds.
     We either have true, go through control flow with new constraint, or false and go with negated? *)
   let meet_tcons _ask (t: t) tcons1 _e _no_ov =
@@ -511,17 +576,30 @@ same indices. Then it calls SubPolyDomain.widen on the updated subpolyhedra. Ada
           | Some c, DISEQ -> if c =:  Mpqf.zero then bot_env else t
           (* expr has variables: record it (inconsistency caught later, at rref) *)
           | None, EQ            -> reduce_to_bot { t with d = Some (SubPolyDomain.add_affeq_row v (Option.get t.d)) }
-          | None, SUPEQ -> reduce_to_bot @@ add_slack_constraint t v (RationalInterval.of_bounds ~lower:(Some Mpqf.zero) ~upper:None)
+          | None, SUPEQ ->
+            let expr_interval = RationalInterval.of_bounds ~lower:(Some Mpqf.zero) ~upper:None in
+            begin match to_single_var_opt v with
+              | Some (col, a, c) when col < Environment.size t.env ->
+                (* single-variable inequality (e.g. a type bound): plain interval on the
+                   variable's column, no slack and no LP needed *)
+                meet_single_var_constraint t col a c expr_interval
+              | _ -> reduce_to_bot @@ add_slack_constraint t v expr_interval
+            end
           | None, SUP ->
             (* over integer variables expr > 0 <=> expr >= 1, provided expr is
                integer-valued: scale by the lcm of the coefficient denominators
                (an equivalent constraint) to clear fractions first *)
-            let lcm = List.fold_left (fun acc (_, c) -> 
+            let lcm = List.fold_left (fun acc (_, c) ->
               Z.lcm acc (Mpqf.get_den c)
-              ) Z.one (CoeffVector.to_sparse_list v) 
+              ) Z.one (CoeffVector.to_sparse_list v)
             in
             let v = if Z.equal lcm Z.one then v else CoeffVector.map_f_preserves_zero (fun c -> c *: mpqf_of_z lcm) v in
-            reduce_to_bot (add_slack_constraint t v (RationalInterval.of_bounds ~lower:(Some Mpqf.one) ~upper:None))
+            let expr_interval = RationalInterval.of_bounds ~lower:(Some Mpqf.one) ~upper:None in
+            begin match to_single_var_opt v with
+              | Some (col, a, c) when col < Environment.size t.env ->
+                meet_single_var_constraint t col a c expr_interval
+              | _ -> reduce_to_bot (add_slack_constraint t v expr_interval)
+            end
           | _ -> t (* DISEQ / EQMOD over variables: not representable, give up (sound) *)
         end
 

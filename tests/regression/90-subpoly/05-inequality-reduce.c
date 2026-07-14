@@ -10,9 +10,8 @@ int main(void) {
 
   __goblint_check(x <= y); // direct slack readback
   __goblint_check(y <= 5); // direct slack readback
-  // Transitive x <= y <= 5 => x <= 5 is currently NOT proven: the check's strict
-  // negation (x > 5) adds a fresh slack x >= 6 but meet_tcons does not reduce, so
-  // the implied bound x <= 5 is never derived to expose the contradiction.
-  __goblint_check(x <= 5); // UNKNOWN
+  // Transitive x <= y <= 5 => x <= 5: proven since meet_tcons reduces after adding
+  // constraints and single-variable bounds are tracked directly (var_intervals).
+  __goblint_check(x <= 5);
   return 0;
 }
