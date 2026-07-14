@@ -335,19 +335,15 @@ let string_of (t: t) =
   let refine_interval (var: Var.t) (intv: I.t) ((env, acc): Core.t * interval_map) : Core.t * interval_map =
     (* get collumn to refine *)
     let col = Var.to_int var in
-
     (* optimze to get upper and lower *)
     let env, upper = optimize env [(col, Mpqf.one)] in
     let env, neg_lower = optimize env [(col, Mpqf.mone)] in
-
     (* revert negation trick *)
     let lower = Option.map Mpqf.neg neg_lower in
-
     (* meet with old interval to get the new bounds for the new interval *)
     match I.meet intv (I.of_bounds ~lower ~upper) with
     | None -> raise Infeasible
     | Some intv' -> (env, VarMap.add var intv' acc)
-
 
   let lp_of (t : t) : Core.t option = 
     try
@@ -604,19 +600,14 @@ let string_of (t: t) =
     with Bot -> None
    
   let meet (a: t) (b: t) = 
+    let open GobOption.Syntax in
     let (new_a, new_b) = slack_lce a b in
-    match Matrix.normalize new_a.affeq, Matrix.normalize new_b.affeq with 
-    | None, _  | _, None -> None
-    | Some x, Some y ->
-      match interval_meet new_a.intervals new_b.intervals with
-      | None -> None
-      | Some new_intervals -> 
-        match Matrix.rref_matrix x y with (* Matrix ist dann in der richtigen Form *)
-        | None -> None
-        | Some new_affeq -> 
-          let new_infos = VarMap.union (fun _ i1 i2 -> if info_equal i1 i2 then Some i1 else failwith "inconsistent slack mapping") new_a.infos new_b.infos in
-          Some {affeq = new_affeq; intervals = new_intervals; infos = new_infos}
-
+    let* x = Matrix.normalize new_a.affeq in
+    let* y = Matrix.normalize new_b.affeq in
+    let* new_intervals = interval_meet new_a.intervals new_b.intervals in
+    let* new_affeq = Matrix.rref_matrix x y in (* Matrix ist dann in der richtigen Form *) 
+    let new_infos = VarMap.union (fun _ i1 i2 -> if info_equal i1 i2 then Some i1 else failwith "inconsistent slack mapping") new_a.infos new_b.infos in
+    Some {affeq = new_affeq; intervals = new_intervals; infos = new_infos}
 
   let widen a b =
     let (remapped_a, remapped_b) = inject_slack_for_widen @@ slack_lce a b in
