@@ -644,8 +644,115 @@ let string_of (t: t) =
       | None, _ | _, None -> None
       | Some v1', Some v2' -> Some (I.widen v1' v2')) a b
    
+  (* ---- Step 3 of join/widen (Algorithm 1/2 in the paper): recover inequalities that
+          the pairwise LinEq join dropped. For an affine equality kappa that held in an
+          operand but is not implied by the joined matrix, its program-variable part
+          s_kappa is a linear form whose value in the joined state is bounded by
+          [s_kappa](x) `combine` [s_kappa](y): in the operand where kappa holds s_kappa is
+          pinned to a point, in the other it is whatever that operand bounds it to. Adding
+          that bound as a canonicalized slack never drops a concrete state of either
+          operand (so it is sound for the join) and recovers precision lost by the convex
+          step. ---- *)
+
+  (** [eval_linform env s] is the interval the program-variable linear form [s]
+      (carrying no constant term) can take in the reduced operand whose LP is [env]. *)
+  let eval_linform (env : Core.t) (s : info) : I.t =
+    match CoeffVector.to_sparse_list s with
+    | [] -> I.top
+    | terms ->
+      let upper = optimize env terms |> snd in
+      let neg_lower = optimize env (List.map (fun (i, c) -> (i, Mpqf.neg c)) terms) |> snd in
+      I.of_bounds ~lower:(Option.map Mpqf.neg neg_lower) ~upper
+
+  (** [s_kappa t row] is the program-variable linear form [s_kappa] equivalent to the
+      equality [row]: the constant is dropped and every slack column [beta] is replaced by
+      its info [info(beta)] (a program-variable linear form for which [beta = info(beta)]
+      holds in the matrix). Substituting - rather than merely dropping - slacks is what lets
+      us recover relations that are only visible through slack aliases (e.g. [x - beta = 0]
+      with [info(beta) = y] yields [x - y]). A slack without info cannot be substituted and
+      is dropped (such orphans have already been removed before join/widen). *)
+  let s_kappa (t : t) (row : info) : info =
+    let const_idx = CoeffVector.length row - 1 in
+    List.fold_left (fun acc (idx, c) ->
+        if idx = const_idx then acc
+        else match VarMap.find_opt idx t.infos with
+          | Some info -> CoeffVector.map2_f_preserves_zero (fun a b -> a +: c *: b) acc info
+          | None -> if VarMap.mem idx t.intervals then acc (* info-less slack: cannot substitute *)
+            else CoeffVector.set_nth acc idx c)
+      (CoeffVector.zero_vec (CoeffVector.length row)) (CoeffVector.to_sparse_list row)
+
+  (** [add_recovered_slack ~on_existing linform iv t] asserts the recovered bound
+      [linform in iv] into [t] by giving [linform] a canonical slack, folding into an
+      existing slack of equal canonical info when possible (keeping the info map injective).
+      [on_existing cur iv'] decides the interval to keep when such a slack already exists:
+      [I.meet] for join (tighten), but for widen we must keep [cur] so the result stays
+      above the old operand ([old <= widen old new]). [linform] must be at [t]'s current
+      width and carry no constant. *)
+  let add_recovered_slack ~(on_existing : I.t -> I.t -> I.t option) (linform : info) (iv : I.t) (t : t) : t =
+    let info, factor = normalize_info linform in
+    let iv' = I.scale (Mpqf.one /: factor) iv in
+    match Seq.find (fun (_, i) -> info_equal i info) (VarMap.to_seq t.infos) with
+    | Some (k, _) ->
+      (match on_existing (VarMap.find k t.intervals) iv' with
+       | Some m -> { t with intervals = VarMap.add k m t.intervals }
+       | None -> t)
+    | None ->
+      insert_slack (Matrix.num_cols t.affeq - 1) info iv' t
+
+  (** [implied joined_rref row] is [true] iff the equality [row] is in the row space of
+      [joined_rref] (which must be a leading-1, pivot-ascending rref): reduce [row] against
+      the rref in one pass and check it vanishes. (We cannot use [Matrix.is_covered_by]
+      here: it loops when [row] has a pivot column that no rref row leads with - exactly the
+      dropped rows we look for.) *)
+  let implied (joined_rref : Matrix.t) (row : info) : bool =
+    let reduced =
+      Matrix.fold_left (fun v pivot_row ->
+          match CoeffVector.find_first_non_zero pivot_row with
+          | None -> v
+          | Some (pivot_col, _) -> (* rref: pivot coefficient is 1 *)
+            let c = CoeffVector.nth v pivot_col in
+            if c =: Mpqf.zero then v
+            else CoeffVector.map2_f_preserves_zero (fun a b -> a -: c *: b) v pivot_row)
+        row joined_rref
+    in
+    CoeffVector.is_zero_vec reduced
+
+  (** [recover_step3 ~combine ~on_existing ~sources x y joined] adds the recovered
+      inequalities to the pairwise-joined state [joined]. [sources] are the operands whose
+      dropped equalities are scanned ([[x; y]] for join, [[x]] for widen); [combine] merges
+      the two operand valuations of each [s_kappa] ([I.join] for join, [I.widen] for widen);
+      [on_existing] decides how a recovered bound folds into an already-present slack of
+      equal info. [x], [y] and [joined] must still share the same column layout, so this
+      runs before any compaction. *)
+  let recover_step3 ~(combine : I.t -> I.t -> I.t) ~(on_existing : I.t -> I.t -> I.t option) ~(sources : t list) (x : t) (y : t) (joined : t) : t =
+    match lp_of x, lp_of y with
+    | Some env_x, Some env_y ->
+      (match Matrix.normalize joined.affeq with
+       | None -> joined
+       | Some joined_rref ->
+         (* collect (s_kappa, recovered interval) for every dropped equality, at the shared
+            original width, before we start growing [joined] with recovered slacks. *)
+         let recovered =
+           List.fold_left (fun acc src ->
+               Matrix.fold_left (fun acc row ->
+                   if implied joined_rref row then acc
+                   else
+                     let s = s_kappa joined row in
+                     if CoeffVector.is_zero_vec s then acc
+                     else
+                       let iv = combine (eval_linform env_x s) (eval_linform env_y s) in
+                       if I.is_top iv then acc else (s, iv) :: acc)
+                 acc src.affeq)
+             [] sources
+         in
+         List.fold_left (fun t (s, iv) ->
+             let s = CoeffVector.of_sparse_list (Matrix.num_cols t.affeq) (CoeffVector.to_sparse_list s) in
+             add_recovered_slack ~on_existing s iv t)
+           joined recovered)
+    | _ -> joined
+
   (**[join a b] returns a subpolyhedra resulting from the join of two subpolyhedras a and b.
-    We assume that the info fields of slack variables are canonical. 
+    We assume that the info fields of slack variables are canonical.
     Slack variables with an interval bound but no info field are discarded, as they cannot be matched
     with slack variables from the other state.
   *)
@@ -660,7 +767,9 @@ let string_of (t: t) =
     | Some x, Some y ->
     let new_intervals = interval_join x.intervals y.intervals in
     let new_affeq = Matrix.linear_disjunct x.affeq y.affeq in
-    Some {affeq = new_affeq; intervals = new_intervals; infos = x.infos}
+    let joined = {affeq = new_affeq; intervals = new_intervals; infos = x.infos} in
+    (* Step 3: recover inequalities dropped by the convex (LinEq) join. *)
+    Some (recover_step3 ~combine:I.join ~on_existing:I.meet ~sources:[x; y] x y joined)
 
   let non_info_entailment a b (non_info : int list) =
     if List.is_empty non_info then true else 
@@ -676,6 +785,20 @@ let string_of (t: t) =
           let upper = optimize env info_terms |> snd |> Option.map (fun m -> m +: info_const) in
           let lower = optimize env (List.map (fun (i, c) -> (i, Mpqf.neg c)) info_terms) |> snd |> Option.map (fun m -> info_const -: m) in
           I.leq (I.of_bounds ~lower ~upper) (VarMap.find orph b.intervals)) non_info
+
+  (** [info_slack_entailment a b extra] checks that every slack in [extra] (info-slacks of
+      [b] whose canonical info does not match any slack of [a]) is entailed by [a]: the
+      linear form [info(beta)] evaluated in [a] must lie within [beta]'s interval in [b].
+      This is the symmetric counterpart of [non_info_entailment] for [b]-side info-slacks
+      that [a] lacks - needed so that e.g. [a: i=k] is recognised as [<= b: i-k in [0,1]]
+      (a slack Step 3 recovery introduces on the widened/joined side). *)
+  let info_slack_entailment a b (extra : int list) =
+    if List.is_empty extra then true else
+    match lp_of a with
+    | None -> true (* a is bottom, hence leq b *)
+    | Some env ->
+      List.for_all (fun sl ->
+          I.leq (eval_linform env (VarMap.find sl b.infos)) (VarMap.find sl b.intervals)) extra
   (**
   [leq a b]
   TODO: Matrix needs to be in rref!
@@ -699,8 +822,16 @@ let string_of (t: t) =
     | Some a, Some b ->
     let processed_a = forget_vars (collect_top a @ collect_non_info a) a in
     let b_non_info = collect_non_info b in
+    (* info-slacks of b that a cannot match by info (and are not top): a must entail them,
+       and they are then dropped so the structural check below only sees matched slacks. *)
+    let b_extra_info =
+      VarMap.fold (fun sl info acc ->
+          if I.is_top (VarMap.find sl b.intervals) || VarMap.exists (fun _ i -> info_equal i info) a.infos
+          then acc else sl :: acc) b.infos []
+    in
     if not @@ non_info_entailment a b b_non_info then false else
-    let processed_b = forget_vars (collect_top b @ b_non_info) b in
+    if not @@ info_slack_entailment a b b_extra_info then false else
+    let processed_b = forget_vars (collect_top b @ b_non_info @ b_extra_info) b in
     let (a_common, b_common) = slack_lce processed_a processed_b in
     match Matrix.normalize a_common.affeq, Matrix.normalize b_common.affeq with 
     | None, _ -> true 
@@ -761,8 +892,14 @@ let string_of (t: t) =
     | Some x, Some y ->
     let new_intervals = interval_widen x.intervals y.intervals in
     let new_affeq = Matrix.linear_disjunct x.affeq y.affeq in
+    (* Step 3: recover inequalities dropped by the convex step. Per Algorithm 2 this is
+       one-directional (only operand 0's dropped equalities, valuations combined with the
+       interval widening) so the operator stays a widening. *)
+    (* widen keeps the existing slack interval on a match (never tighten) so the operator
+       stays increasing: [old <= widen old new]. *)
+    let joined = recover_step3 ~combine:I.widen ~on_existing:(fun cur _ -> Some cur) ~sources:[x] x y {affeq = new_affeq; intervals = new_intervals; infos = x.infos} in
     let lost_vars = Array.of_enum @@ VarMap.keys @@ VarMap.filter (fun v _ -> not (VarMap.mem v new_intervals)) y.intervals in
-    Some (remove_columns lost_vars {affeq = new_affeq; intervals = new_intervals; infos = x.infos} true)
+    Some (remove_columns lost_vars joined true)
 
   let narrow = meet
   let unify = meet
