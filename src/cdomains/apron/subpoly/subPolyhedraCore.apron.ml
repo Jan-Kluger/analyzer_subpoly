@@ -745,14 +745,16 @@ let string_of (t: t) =
           step. ---- *)
 
   (** [eval_linform env s] is the interval the program-variable linear form [s]
-      (carrying no constant term) can take in the reduced operand whose LP is [env]. *)
-  let eval_linform (env : Core.t) (s : info) : I.t =
+      (carrying no constant term) can take in the reduced operand whose LP is [env].
+      Threads the solver environment like [refine_interval] does, so consecutive
+      calls reuse the pivoted tableau instead of restarting the simplex. *)
+  let eval_linform (env : Core.t) (s : info) : Core.t * I.t =
     match CoeffVector.to_sparse_list s with
-    | [] -> I.top
+    | [] -> env, I.top
     | terms ->
-      let upper = optimize env terms |> snd in
-      let neg_lower = optimize env (List.map (fun (i, c) -> (i, Mpqf.neg c)) terms) |> snd in
-      I.of_bounds ~lower:(Option.map Mpqf.neg neg_lower) ~upper
+      let env, upper = optimize env terms in
+      let env, neg_lower = optimize env (List.map (fun (i, c) -> (i, Mpqf.neg c)) terms) in
+      env, I.of_bounds ~lower:(Option.map Mpqf.neg neg_lower) ~upper
 
   (** [s_kappa t row] is the program-variable linear form [s_kappa] equivalent to the
       equality [row]: the constant is dropped and every slack column [beta] is replaced by
@@ -809,6 +811,23 @@ let string_of (t: t) =
     in
     CoeffVector.is_zero_vec reduced
 
+  (** [interval_eval vmap s] bounds the linear form [s] by interval arithmetic over the
+      per-column bounds in [vmap] (missing key = unbounded). Cheap redundancy check for
+      recovered bounds: a bound the joined state's own column intervals already imply
+      adds no information, only a slack (plus matrix row) that every later [reduce]
+      would keep paying for. *)
+  let interval_eval (vmap : interval_map) (s : info) : I.t =
+    let add a b = match a, b with Some a, Some b -> Some (a +: b) | _ -> None in
+    List.fold_left (fun acc (col, c) ->
+        let ci = match VarMap.find_opt col vmap with
+          | None -> I.top
+          | Some vi -> I.scale c vi
+        in
+        let (l1, u1) = I.bounds acc and (l2, u2) = I.bounds ci in
+        I.of_bounds ~lower:(add l1 l2) ~upper:(add u1 u2))
+      (I.of_bounds ~lower:(Some Mpqf.zero) ~upper:(Some Mpqf.zero))
+      (CoeffVector.to_sparse_list s)
+
   (** [recover_step3 ~combine ~on_existing ~sources x y joined] adds the recovered
       inequalities to the pairwise-joined state [joined]. [sources] are the operands whose
       dropped equalities are scanned ([[x; y]] for join, [[x]] for widen); [combine] merges
@@ -817,43 +836,88 @@ let string_of (t: t) =
       equal info. [x], [y] and [joined] must still share the same column layout, so this
       runs before any compaction. *)
   let recover_step3 ~(combine : I.t -> I.t -> I.t) ~(on_existing : I.t -> I.t -> I.t option) ~(sources : t list) (x : t) (y : t) (joined : t) : t =
-    match lp_of x, lp_of y with
-    | Some env_x, Some env_y ->
-      (match Matrix.normalize joined.affeq with
-       | None -> joined
-       | Some joined_rref ->
-         (* collect (s_kappa, recovered interval) for every dropped equality, at the shared
-            original width, before we start growing [joined] with recovered slacks. *)
-         let recovered =
-           List.fold_left (fun acc src ->
-               Matrix.fold_left (fun acc row ->
-                   if implied joined_rref row then acc
-                   else
-                     let s = s_kappa joined row in
-                     if CoeffVector.is_zero_vec s then acc
-                     else
-                       let iv = combine (eval_linform env_x s) (eval_linform env_y s) in
-                       if I.is_top iv then acc else (s, iv) :: acc)
-                 acc src.affeq)
-             [] sources
-         in
-         (* true state width: [joined.affeq] can be empty (branches share no equality),
-            whose [num_cols] is 0, so derive it from the operands instead. Track it through
-            the fold since each fresh slack widens the state by one column. *)
-         let width0 =
-           if not (Matrix.is_empty joined.affeq) then Matrix.num_cols joined.affeq
-           else List.fold_left (fun w src ->
-               max w (if Matrix.is_empty src.affeq then 0 else Matrix.num_cols src.affeq)) 0 sources
-         in
-         let res, _ =
-           List.fold_left (fun (t, width) (s, iv) ->
-               let s = CoeffVector.of_sparse_list width (CoeffVector.to_sparse_list s) in
-               let t, grew = add_recovered_slack ~on_existing ~slack_col:(width - 1) s iv t in
-               (t, if grew then width + 1 else width))
-             (joined, width0) recovered
-         in
-         res)
-    | _ -> joined
+    match Matrix.normalize joined.affeq with
+    | None -> joined
+    | Some joined_rref ->
+      (* Candidate dropped equalities, collected without touching the LP: rows not
+         implied by the joined matrix whose program-variable form is non-trivial. On
+         the fixpoint's hot path (re-joining states that already agree) this list is
+         empty and no simplex environment is ever built. *)
+      let candidates =
+        List.fold_left (fun acc src ->
+            Matrix.fold_left (fun acc row ->
+                if implied joined_rref row then acc
+                else
+                  let s = s_kappa joined row in
+                  if CoeffVector.is_zero_vec s then acc else s :: acc)
+              acc src.affeq)
+          [] sources
+      in
+      if List.is_empty candidates then joined
+      else begin
+        (* Each operand's LP is built on first use only and the environment returned by
+           the solver is threaded through later calls (the same incremental pattern as
+           [reduce]'s refine fold). *)
+        let cache_x = ref None and cache_y = ref None in
+        let eval cache (src : t) (s : info) : I.t =
+          (* Stored-bound shortcut: on a reduced operand every stored program-variable
+             bound is already the tightest the LP implies (that is what [reduced]
+             certifies), so a single-variable form needs no solver call at all. *)
+          let stored =
+            if not src.reduced then None
+            else match CoeffVector.to_sparse_list s with
+              | [(col, c)] -> Option.map (I.scale c) (VarMap.find_opt col src.var_intervals)
+              | _ -> None
+          in
+          match stored with
+          | Some iv -> iv
+          | None ->
+            let env_opt = match !cache with
+              | Some e -> e
+              | None -> let e = lp_of src in cache := Some e; e
+            in
+            match env_opt with
+            | None -> I.top (* operand infeasible: it bounds nothing *)
+            | Some env ->
+              let env, iv = eval_linform env s in
+              cache := Some (Some env); iv
+        in
+        (* collect (s_kappa, recovered interval) at the shared original width, before we
+           start growing [joined] with recovered slacks. *)
+        let recovered =
+          List.filter_map (fun s ->
+              let iv_x = eval cache_x x s in
+              (* [combine] is [I.join] or [I.widen]; both map a top first argument to
+                 top, so y's valuation is only computed when x actually bounds s. *)
+              if I.is_top iv_x then None
+              else
+                let iv = combine iv_x (eval cache_y y s) in
+                if I.is_top iv then None
+                (* drop bounds the joined column intervals already imply: e.g. the
+                   single-variable forms of dropped constant equalities (x=5 vs x=7)
+                   recover exactly the joined var_interval and would only bloat the
+                   state with a redundant slack *)
+                else if I.leq (interval_eval joined.var_intervals s) iv then None
+                else Some (s, iv))
+            candidates
+        in
+        (* true state width: [joined.affeq] can be empty (branches share no equality),
+           whose [num_cols] is 0, so derive it from the operands instead. Track it through
+           the fold since each fresh slack widens the state by one column. *)
+        let width0 =
+          if not (Matrix.is_empty joined.affeq) then Matrix.num_cols joined.affeq
+          else List.fold_left (fun w src ->
+              max w (if Matrix.is_empty src.affeq then 0 else Matrix.num_cols src.affeq)) 0 sources
+        in
+        let res, _ =
+          List.fold_left (fun (t, width) (s, iv) ->
+              let s = CoeffVector.of_sparse_list width (CoeffVector.to_sparse_list s) in
+              let t, grew = add_recovered_slack ~on_existing ~slack_col:(width - 1) s iv t in
+              (t, if grew then width + 1 else width))
+            (joined, width0) recovered
+        in
+        res
+      end
 
   (**[join a b] returns a subpolyhedra resulting from the join of two subpolyhedras a and b.
     We assume that the info fields of slack variables are canonical.
@@ -878,23 +942,31 @@ let string_of (t: t) =
     Some (recover_step3 ~combine:I.join ~on_existing:I.meet ~sources:[x; y] x y joined)
 
   (** [entailed_bounds env info] is the tightest interval the LP [env] implies for the
-      linear form described by [info] (the constant slot, if any, is included). *)
-  let entailed_bounds (env: Core.t) (info: info) : I.t =
+      linear form described by [info] (the constant slot, if any, is included). Threads
+      the solver environment so consecutive calls reuse the pivoted tableau. *)
+  let entailed_bounds (env: Core.t) (info: info) : Core.t * I.t =
     let info_const = CoeffVector.nth info (CoeffVector.length info - 1) in
     let info_terms = CoeffVector.to_sparse_list (CoeffVector.set_nth info (CoeffVector.length info - 1) Mpqf.zero) in
-    let upper = optimize env info_terms |> snd |> Option.map (fun m -> m +: info_const) in
-    let lower = optimize env (List.map (fun (i, c) -> (i, Mpqf.neg c)) info_terms) |> snd |> Option.map (fun m -> info_const -: m) in
-    I.of_bounds ~lower ~upper
+    let env, upper = optimize env info_terms in
+    let env, neg_lower = optimize env (List.map (fun (i, c) -> (i, Mpqf.neg c)) info_terms) in
+    env, I.of_bounds ~lower:(Option.map (fun m -> info_const -: m) neg_lower)
+      ~upper:(Option.map (fun m -> m +: info_const) upper)
 
-  let non_info_entailment a b (non_info : int list) =
+  (** [env_a] is [a]'s LP, built lazily so callers can share one construction across
+      several entailment checks (and never pay for it when all check lists are empty). *)
+  let non_info_entailment (env_a : Core.t option Lazy.t) b (non_info : int list) =
     if List.is_empty non_info then true else
-    match lp_of a with
+    match Lazy.force env_a with
     | None -> true (*a is bottom and therefore leq to b.*)
     | Some env ->
+      let env = ref env in
       List.for_all (fun orph ->
         match recover_def_from_non_info_intv orph b with
         | None -> false
-        | Some info -> I.leq (entailed_bounds env info) (VarMap.find orph b.intervals)) non_info
+        | Some info ->
+          let env', iv = entailed_bounds !env info in
+          env := env';
+          I.leq iv (VarMap.find orph b.intervals)) non_info
   (**
   [leq a b]: is every constraint of [b] entailed by [a]? Constraints only [a] has
   (extra slacks, extra rows, extra variable bounds) make [a] smaller and are irrelevant.
@@ -925,7 +997,9 @@ let string_of (t: t) =
     && begin
       let processed_a = forget_vars (collect_top a @ collect_non_info a) a in
       let b_non_info = collect_non_info b in
-      if not @@ non_info_entailment a b b_non_info then false else
+      (* one LP construction for [a], shared by the orphan and b-only entailment checks *)
+      let env_a = lazy (lp_of a) in
+      if not @@ non_info_entailment env_a b b_non_info then false else
       let processed_b = forget_vars (collect_top b @ b_non_info) b in
       (* Slacks that exist only in [b] (their info matches no slack of [a]) need special
          treatment: their interval constraint would otherwise never be compared against
@@ -942,13 +1016,17 @@ let string_of (t: t) =
         match b_only with
         | [] -> true
         | _ ->
-          match lp_of a with
+          match Lazy.force env_a with
           | None -> true (* a is bottom *)
           | Some env ->
+            let env = ref env in
             List.for_all (fun (var, info) ->
                 match VarMap.find_opt var processed_b.intervals with
                 | None -> true (* unconstrained slack: nothing to entail *)
-                | Some b_intv -> I.leq (entailed_bounds env info) b_intv) b_only
+                | Some b_intv ->
+                  let env', iv = entailed_bounds !env info in
+                  env := env';
+                  I.leq iv b_intv) b_only
       in
       if not b_only_entailed then false else
       let processed_b = forget_vars (List.map fst b_only) processed_b in
