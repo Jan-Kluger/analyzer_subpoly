@@ -199,21 +199,161 @@ module SubPoly (Var : Var) (I : IntervalSig with type bound = Mpqf.t) = struct
     in
     {affeq = new_affeq; intervals = new_intervals; infos = new_infos}
 
-    
+  (* ---- Canonicalization of infos (moved here from the domain so it can be reused
+          by reclamation in forget_vars and, later, by Step 3 of join/widen). ---- *)
+
+  let mpqf_of_z z = Mpqf.of_mpz @@ Z_mlgmpidl.mpzf_of_z z
+
+  (** [gcd_list v] gcd of all stored (non-zero) coefficient numerators. *)
+  let gcd_list (v: info) : Z.t =
+    let gcd =
+      CoeffVector.to_sparse_list v
+      |> List.fold_left (fun acc (_, c) -> Z.gcd acc (Mpqf.get_num c)) Z.zero
+    in
+    (* an all-zero vector has gcd 0, so fall back to 1 to make dividing a no-op *)
+    if Z.equal gcd Z.zero then Z.one else gcd
+
+  (** [lcm_den_list v] lcm of the denominators of every stored coefficient. *)
+  let lcm_den_list (v: info) : Z.t =
+    CoeffVector.to_sparse_list v
+    |> List.fold_left (fun acc (_, c) -> Z.lcm acc (Mpqf.get_den c)) Z.one
+
+  (** [normalize_info v] returns [(v / factor, factor)] where [factor = sign * gcd / lcm]:
+      it clears the common content and denominators and flips the sign so the leading
+      (lowest-index) coefficient is positive. *)
+  let normalize_info (v: info) : info * Mpqf.t =
+    let gcd = gcd_list v in
+    let lcm = lcm_den_list v in
+    let sign = match CoeffVector.find_first_non_zero v with
+      | Some (_, leading) when leading <: Mpqf.zero -> Mpqf.mone
+      | _ -> Mpqf.one
+    in
+    let factor = sign *: mpqf_of_z gcd /: mpqf_of_z lcm in
+    CoeffVector.map_f_preserves_zero (fun c -> c /: factor) v, factor
+
+  let negate v = CoeffVector.map_f_preserves_zero Mpqf.neg v
+
+  (** [recover_def_from_non_info_intv var t] searches the matrix for a row in which [var]
+      occurs with a non-zero coefficient and every other non-zero entry is a program
+      variable (or the constant) - i.e. no other slack appears. Such a row proves
+      [var = linear form over program variables (+ constant)]; that linear form (with the
+      constant kept) is returned as [Some]. Returns [None] when no such row exists. *)
+  let recover_def_from_non_info_intv (var : int) (subpoly : t) : info option =
+    let only_prog_vars v  = List.for_all (fun (idx, _) -> (not @@ (VarMap.mem idx subpoly.intervals)) || (idx = var)) (CoeffVector.to_sparse_list v) in
+    match Matrix.find_opt (fun vec -> ((CoeffVector.nth vec var) <>: Mpqf.zero) && only_prog_vars vec) subpoly.affeq with
+    | None -> None
+    | Some vec ->
+      let coeff = CoeffVector.nth vec var in
+      Some (CoeffVector.map (fun (i, c) -> (i, Mpqf.neg (c /: coeff))) (CoeffVector.set_nth vec var Mpqf.zero))
+
+  (** [canonicalize_slack slack raw_def t] rescales the existing slack column [slack] so
+      that the slack variable becomes equal to the canonical (gcd/lcm/sign-normalized,
+      constant-free) form of [raw_def]. [raw_def] must be a linear form over program
+      variables (possibly with a constant) that the matrix already proves equal to the
+      slack. Returns the adapted state together with the canonical [info] that was stored.
+
+      Let [normalized = raw_def / factor] and [const] its constant part (both from
+      [normalize_info]); the canonical info is [normalized] with the constant stripped,
+      hence the new slack value is [slack_new = slack_old / factor - const], i.e.
+      [slack_old = factor * slack_new + factor * const]. We apply exactly this invertible
+      change of variable:
+      - every matrix row scales [slack]'s coefficient by [factor] and adds
+        [coeff * factor * const] to its constant term;
+      - the slack's interval is transformed the same way [add_slack_constraint] does:
+        [add_const (-const) (scale (1/factor) iv)];
+      - [info] is stored as the slack's canonical definition.
+
+      This is the reusable primitive intended for Step 3 of join/widen as well. *)
+  let canonicalize_slack (slack : int) (raw_def : info) (t : t) : t * info =
+    let normalized, factor = normalize_info raw_def in
+    let const_idx = CoeffVector.length normalized - 1 in
+    let const = CoeffVector.nth normalized const_idx in
+    let info = CoeffVector.set_nth normalized const_idx Mpqf.zero in
+    let adapt_row row =
+      let c = CoeffVector.nth row slack in
+      if c =: Mpqf.zero then row
+      else
+        let row = CoeffVector.set_nth row slack (c *: factor) in
+        let cidx = CoeffVector.length row - 1 in
+        CoeffVector.set_nth row cidx (CoeffVector.nth row cidx +: c *: factor *: const)
+    in
+    let new_affeq = Matrix.map adapt_row t.affeq in
+    let old_iv = VarMap.find slack t.intervals in
+    let new_iv = I.add_const (Mpqf.neg const) (I.scale (Mpqf.one /: factor) old_iv) in
+    ({ affeq = new_affeq;
+       intervals = VarMap.add slack new_iv t.intervals;
+       infos = VarMap.add slack info t.infos },
+     info)
+
+  (** [reclaim_slack slack t] tries to give the info-less slack [slack] a canonical info
+      recovered from the matrix. On success returns the canonicalized state and the stored
+      [info]; returns [None] when no definition over program variables is derivable (or the
+      only derivable definition is a bare constant, which carries no relational info). *)
+  let reclaim_slack (slack : int) (t : t) : (t * info) option =
+    match recover_def_from_non_info_intv slack t with
+    | None -> None
+    | Some raw_def ->
+      let const_idx = CoeffVector.length raw_def - 1 in
+      let has_prog_term = List.exists (fun (i, c) -> i <> const_idx && c <>: Mpqf.zero) (CoeffVector.to_sparse_list raw_def) in
+      if not has_prog_term then None
+      else Some (canonicalize_slack slack raw_def t)
+
+  (** [reclaim_slacks t] attempts to re-derive a canonical info for every slack that has
+      an interval but no info (as happens after [remove_columns] drops infos mentioning a
+      forgotten program variable). Each such slack whose value is still provable from the
+      matrix regains an info. *)
+  let reclaim_slacks (t : t) : t =
+    VarMap.fold (fun slack _ acc ->
+        if VarMap.mem slack acc.infos then acc
+        else
+          match reclaim_slack slack acc with
+          | None -> acc
+          | Some (acc, info) ->
+            (* [acc] now has [slack] canonicalized to [info] (matrix column rescaled,
+               interval scaled to match). Reclamation can make [slack] provably equal to
+               another slack that already carries this canonical info. *)
+            let existing =
+              Seq.find (fun (k, i) -> k <> slack && info_equal i info)
+                (VarMap.to_seq acc.infos)
+            in
+            (match existing with
+             | None -> acc
+             | Some (k, _) ->
+               (* DEDUP (removable): keep the info map injective by folding [slack] into
+                  the existing slack [k]. Both now equal [info], so we meet [slack]'s
+                  (canonically-scaled) interval into [k] and strip [slack]'s info, leaving
+                  it as an info-less orphan that [slack_lce] discards later. We deliberately
+                  do NOT remove [slack]'s column: that would shrink the matrix width and
+                  shift the constant index, breaking callers (e.g. [add_equation]) that hold
+                  a coeff vector computed at the old width. This arm is the only place
+                  duplicate-info merging happens for reclamation; if duplicate infos ever
+                  become acceptable, delete it. *)
+               let merged = match I.meet (VarMap.find k acc.intervals) (VarMap.find slack acc.intervals) with
+                 | Some m -> m
+                 | None -> VarMap.find k acc.intervals (* disjoint (already bottom): keep k's interval *)
+               in
+               { acc with intervals = VarMap.add k merged acc.intervals;
+                          infos = VarMap.remove slack acc.infos }))
+      t.intervals t
+
   (**
     [forget_vars vars t] forgets a list of variables in the polyhedron.
     For slack variables it compacts the indices such that slack variables indices do not carry gaps.
-    Future TODO: Currently we do Gaussian elimination with the variable as pivot ([Matrix.reduce_col]).
-    This is fine for the affeq, but we do not want to blindly remove any slack variable info containing x
-    from our info_map. Currently this happens, but refinement is needed in the future!
+    [remove_columns] does Gaussian elimination with each forgotten program variable as pivot
+    ([Matrix.reduce_col]) and drops any slack info that mentions a forgotten variable. Those
+    slacks become info-less orphans; [reclaim_slacks] then tries to re-derive a canonical
+    info for each from a matrix row that still proves it over the remaining variables.
   *)
   let forget_vars (vars: Var.t list) (t: t) =
     let dim_array = Array.of_list vars in
-    match List.partition (flip VarMap.mem t.intervals) vars with 
+    match List.partition (flip VarMap.mem t.intervals) vars with
     | [], [] -> t
-    | [], _ -> remove_columns dim_array t false
+    (* forgetting program variables drops the infos mentioning them (see [remove_columns]),
+       so we try to reclaim a canonical info for the resulting info-less slacks. Forgetting
+       only slacks creates no info-less slacks, hence no reclamation there. *)
+    | [], _ -> reclaim_slacks (remove_columns dim_array t false)
     | _, [] -> remove_columns dim_array t true
-    | slack_vars, prog_vars -> remove_columns (Array.of_list prog_vars) (remove_columns (Array.of_list slack_vars) t true) false
+    | slack_vars, prog_vars -> reclaim_slacks (remove_columns (Array.of_list prog_vars) (remove_columns (Array.of_list slack_vars) t true) false)
 
   
   (**
@@ -522,14 +662,6 @@ let string_of (t: t) =
     let new_affeq = Matrix.linear_disjunct x.affeq y.affeq in
     Some {affeq = new_affeq; intervals = new_intervals; infos = x.infos}
 
-  let recover_def_from_non_info_intv (var : int) (subpoly : t) : info option=
-    let only_prog_vars v  = List.for_all (fun (idx, _) -> (not @@ (VarMap.mem idx subpoly.intervals)) || (idx = var)) (CoeffVector.to_sparse_list v) in
-    match Matrix.find_opt (fun vec -> ((CoeffVector.nth vec var) <>: Mpqf.zero) && only_prog_vars vec) subpoly.affeq with 
-    | None -> None
-    | Some vec ->
-      let coeff = CoeffVector.nth vec var in
-      Some (CoeffVector.map (fun (i, c) -> (i, Mpqf.neg (c /: coeff))) (CoeffVector.set_nth vec var Mpqf.zero))
-  
   let non_info_entailment a b (non_info : int list) =
     if List.is_empty non_info then true else 
     match lp_of a with 
