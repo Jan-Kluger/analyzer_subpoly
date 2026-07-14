@@ -61,37 +61,11 @@ module Linexpr_managment = struct
     | Some (i, value) when i = CoeffVector.length v - 1 -> Some value
     | _ -> None
 
-  let mpqf_of_z z = Mpqf.of_mpz @@ Z_mlgmpidl.mpzf_of_z z
-
-  (** [gcd_list v] gcd of coeffvec. Gcd with all coefficients. *)
-  let gcd_list (v: linexpr) : Z.t =
-    (* fold Z.gcd over the numerators of every stored (non-zero) coefficient *)
-    let gcd =
-      CoeffVector.to_sparse_list v
-      |> List.fold_left (fun acc (_, c) -> Z.gcd acc (Mpqf.get_num c)) Z.zero
-    in
-    (* an all-zero vector has gcd 0, so fall back to 1 to make dividing a no-op *)
-    if Z.equal gcd Z.zero then Z.one else gcd
-
-  (** [lcm_den_list v] lcm of the denominators of every stored coefficient. *)
-  let lcm_den_list (v: linexpr) : Z.t =
-    CoeffVector.to_sparse_list v
-    |> List.fold_left (fun acc (_, c) -> Z.lcm acc (Mpqf.get_den c)) Z.one
-
-  let normalize_info (v: linexpr) : linexpr * Mpqf.t =
-    let gcd = gcd_list v in
-    let lcm = lcm_den_list v in
-    (* sign normalization, flip so the leading (lowest-index) coefficient is positive *)
-    let sign = match CoeffVector.find_first_non_zero v with
-      | Some (_, leading) when leading <: Mpqf.zero -> Mpqf.mone
-      | _ -> Mpqf.one
-    in
-    (* the factor we divide out carries both the magnitude (the content gcd/lcm) and the sign *)
-    let factor = sign *: mpqf_of_z gcd /: mpqf_of_z lcm in
-    (* divide every (non-zero) coefficient, zeros are left untouched *)
-    CoeffVector.map_f_preserves_zero (fun c -> c /: factor) v, factor
-
-  let negate v = CoeffVector.map_f_preserves_zero Mpqf.neg v
+  (* Canonicalization helpers now live in the core (SubPolyDomain) so reclamation in
+     forget_vars and Step 3 of join/widen can reuse them; kept as aliases here. *)
+  let mpqf_of_z = SubPolyDomain.mpqf_of_z
+  let normalize_info = SubPolyDomain.normalize_info
+  let negate = SubPolyDomain.negate
 
   (** [to_single_var_opt v] is [Some (col, a, c)] iff [v] describes [a*x_col + c] with
       [a <> 0], i.e. the expression mentions exactly one variable. *)
