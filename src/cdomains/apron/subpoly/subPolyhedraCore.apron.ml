@@ -574,6 +574,11 @@ let string_of (t: t) =
     if not @@ non_info_entailment a b b_non_info then false else
     let processed_b = forget_vars (collect_top b @ b_non_info) b in
     let (a_common, b_common) = slack_lce processed_a processed_b in
+    match Matrix.normalize a_common.affeq, Matrix.normalize b_common.affeq with 
+    | None, _ -> true 
+    | _, None -> false 
+    |Some a_affeq, Some b_affeq ->
+    let a_common = {a_common with affeq = a_affeq} and b_common = {b_common with affeq = b_affeq} in
     VarMap.for_all (fun v k -> 
       match VarMap.find_opt v b_common.infos with 
       | Some k' -> info_equal k' k
