@@ -409,19 +409,18 @@ let poly_diff =
        | Some msg ->
          Test.fail_reportf "polyhedra refutes subpoly at end of trace: %s@.state: %s" msg (D.show t))
 
-(* The DomainProperties lattice-law tests state every law up to mutual [leq],
-   but the manual implementation's [leq] does not terminate on some reachable
-   state pairs: it calls [Matrix.is_covered_by] on matrices whose rows do not
-   lead in compatible columns (the leq TODO in subPolyhedraCore), and
-   [is_linearly_independent_rref] recurses forever when the first remaining row
-   of [m2] has its leading entry strictly right of the current pivot (the
-   subtraction then never eliminates the pivot). Still reproduces after the
-   normalization/stale-slack fixes (master 783cf66dd), e.g. leq of
-   [y/2 - 11/2 = 0] (no slacks) against
-   [x - y/2 - s3/2 = 0; s3 in (-inf,-7]; info s3 = 2x - y]:
-   the left matrix leads at column y, the right at column x.
-   Until that is fixed the lattice-law tests are opt-in: set
-   SUBPOLY_LATTICE_LAWS to include them. *)
+(* The DomainProperties lattice-law tests state every law up to mutual [leq].
+   They are opt-in (set SUBPOLY_LATTICE_LAWS) because the manual [leq] is
+   currently unreliable. The former infinite loop in listMatrix's
+   [is_linearly_independent_rref] (a candidate pivot column with no matching
+   pivot row in the other matrix) is fixed, so the laws now fail fast with
+   counterexamples instead of hanging — but 19 of the 30 still fail, starting
+   with leq reflexivity: [leq] hands [Matrix.is_covered_by] matrices that are
+   not in rref over a shared column layout (the leq TODO in subPolyhedraCore;
+   meet_tcons appends rows unnormalized and slack_lce remaps columns), so the
+   rref-based cover check returns false negatives. [leq x (top ())] also fails
+   because leq rejects environment supersets (env_comp > 0). Enable once the
+   manual leq normalizes its operands. *)
 let lattice_law_tests =
   if Sys.getenv_opt "SUBPOLY_LATTICE_LAWS" <> None
   then E.tests @ Le.tests @ J.tests @ M.tests @ B.tests @ T.tests @ C.tests @ W.tests @ N.tests

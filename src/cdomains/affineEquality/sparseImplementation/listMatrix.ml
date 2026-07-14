@@ -374,8 +374,17 @@ module ListMatrix: SparseMatrixFunctor =
           match m' with
           | [] -> not @@ V.is_zero_vec v
           | x::xs ->
-            let new_v = V.map2_f_preserves_zero (fun v1 v2 -> v1 -: (pivot *: v2)) v x in
-            is_linearly_independent_rref new_v m'
+            match V.find_first_non_zero x with
+            | Some (idx', x_pivot) when idx' = pivot_id ->
+              (* scale by the row's leading coefficient so the pivot column cancels
+                 exactly even when the row is not normalized to a leading 1 *)
+              let new_v = V.map2_f_preserves_zero (fun v1 v2 -> v1 -: (pivot /: x_pivot *: v2)) v x in
+              is_linearly_independent_rref new_v m'
+            | _ ->
+              (* remaining rows lead strictly right of the pivot (rref rows are sorted by
+                 leading index), so no combination can eliminate it: v is independent.
+                 Recursing here would never make progress. *)
+              true
       in
       if compare_num_rows m1 m2 > 0 then false else
         let rec is_covered_by_helper m1 m2 =
