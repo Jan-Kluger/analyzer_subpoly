@@ -411,13 +411,15 @@ let poly_diff =
 
 (* The DomainProperties lattice-law tests state every law up to mutual [leq],
    but the manual implementation's [leq] does not terminate on some reachable
-   state pairs: it calls [Matrix.is_covered_by] on matrices that are not in
-   rref over the same column layout (the leq TODO in subPolyhedraCore), and
+   state pairs: it calls [Matrix.is_covered_by] on matrices whose rows do not
+   lead in compatible columns (the leq TODO in subPolyhedraCore), and
    [is_linearly_independent_rref] recurses forever when the first remaining row
    of [m2] has its leading entry strictly right of the current pivot (the
-   subtraction then never eliminates the pivot). Repro: leq of
-   [y + 2z + 4 = 0; s3 in [-8,inf); s4 in [0,inf); no infos] against
-   [2x + y/2 - z - s3 + 3 = 0; s3 in [-5,inf); info s3 = 2x - y - z].
+   subtraction then never eliminates the pivot). Still reproduces after the
+   normalization/stale-slack fixes (master 783cf66dd), e.g. leq of
+   [y/2 - 11/2 = 0] (no slacks) against
+   [x - y/2 - s3/2 = 0; s3 in (-inf,-7]; info s3 = 2x - y]:
+   the left matrix leads at column y, the right at column x.
    Until that is fixed the lattice-law tests are opt-in: set
    SUBPOLY_LATTICE_LAWS to include them. *)
 let lattice_law_tests =
