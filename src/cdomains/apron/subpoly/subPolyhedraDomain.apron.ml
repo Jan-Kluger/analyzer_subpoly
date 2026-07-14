@@ -9,7 +9,7 @@ module M = Messages
 open GobApron
 open SubPolyhedraCore
 
-module Mpqf = SharedFunctions.Mpqf
+module Rat = SubRat.Rat
 module RationalInterval = Rationalinterval.RationalInterval
 
 (** Variable
@@ -40,39 +40,39 @@ end
 
 module Linexpr_managment = struct
   include VarManagement
-  include RatOps.ConvenienceOps (Mpqf)
+  include RatOps.ConvenienceOps (Rat)
 
   module V = RelationDomain.V
   module CoeffVector = VarManagement.SubPolyDomain.CoeffVector
   type linexpr = CoeffVector.t
 
   (* Adapted version of Leonie's Texpr parsing from her SparseOctagon domain. Instead of monomials we now use coeff vector. *)
-  let mpqf_of_scalar (x: Scalar.t) =
+  let rat_of_scalar (x: Scalar.t) =
     match x with
-    | Float f -> Mpqf.of_float f
-    | Mpqf q -> q
-    | Mpfrf m -> Mpfr.to_mpq m
+    | Float f -> Rat.of_float f
+    | Mpqf q -> Z_mlgmpidl.q_of_mpqf q
+    | Mpfrf m -> Z_mlgmpidl.q_of_mpq (Mpfr.to_mpq m)
 
   (** [to_constant_opt v] is [Some c] iff [v] has no variable coefficients, i.e. it
      represents just the constant [c] (the first non-zero entry is the last slot). *)
-  let to_constant_opt (v: linexpr) : Mpqf.t option =
+  let to_constant_opt (v: linexpr) : Rat.t option =
     match CoeffVector.find_first_non_zero v with
-    | None -> Some Mpqf.zero
+    | None -> Some Rat.zero
     | Some (i, value) when i = CoeffVector.length v - 1 -> Some value
     | _ -> None
 
   (* Canonicalization helpers now live in the core (SubPolyDomain) so reclamation in
      forget_vars and Step 3 of join/widen can reuse them; kept as aliases here. *)
-  let mpqf_of_z = SubPolyDomain.mpqf_of_z
+  let rat_of_z = SubPolyDomain.rat_of_z
   let normalize_info = SubPolyDomain.normalize_info
   let negate = SubPolyDomain.negate
 
   (** [to_single_var_opt v] is [Some (col, a, c)] iff [v] describes [a*x_col + c] with
       [a <> 0], i.e. the expression mentions exactly one variable. *)
-  let to_single_var_opt (v: linexpr) : (int * Mpqf.t * Mpqf.t) option =
+  let to_single_var_opt (v: linexpr) : (int * Rat.t * Rat.t) option =
     let const_idx = CoeffVector.length v - 1 in
     match List.partition (fun (j, _) -> j <> const_idx) (CoeffVector.to_sparse_list v) with
-    | [(col, a)], consts -> Some (col, a, match consts with [] -> Mpqf.zero | (_, c) :: _ -> c)
+    | [(col, a)], consts -> Some (col, a, match consts with [] -> Rat.zero | (_, c) :: _ -> c)
     | _ -> None
 
   (* if one of them is a constant, then multiply. Otherwise, the expression is not linear, return None *)
@@ -96,10 +96,10 @@ module Linexpr_managment = struct
           (* interval constants are not supported *)
           raise NotLinearExpr
         | Cst (Scalar x) ->
-          (* convert the scalar to an Mpqf *)
-          let c = mpqf_of_scalar x in
+          (* convert the scalar to an Rat *)
+          let c = rat_of_scalar x in
           CoeffVector.set_nth zero_vec const_idx c
-        | Var x -> CoeffVector.set_nth zero_vec (Environment.dim_of_var t.env x) Mpqf.one
+        | Var x -> CoeffVector.set_nth zero_vec (Environment.dim_of_var t.env x) Rat.one
         | Unop  (Neg,  e, _, _) -> negate (convert_texpr e)
         | Unop  (Cast, e, _, _) -> convert_texpr e
         | Binop (Add, e1, e2, _, _) -> CoeffVector.map2_f_preserves_zero (+:) (convert_texpr e1) (convert_texpr e2)
@@ -111,7 +111,7 @@ module Linexpr_managment = struct
         | Binop (Div, e1, e2, _, _) ->
           let v1 = convert_texpr e1 in
           begin match to_constant_opt (convert_texpr e2) with
-            | Some c when not (c =: Mpqf.zero) -> CoeffVector.map_f_preserves_zero (fun x -> x /: c) v1
+            | Some c when not (c =: Rat.zero) -> CoeffVector.map_f_preserves_zero (fun x -> x /: c) v1
             | _ -> raise NotLinearExpr end
         | _  -> raise NotLinearExpr end
     in match convert_texpr texp with
@@ -121,7 +121,7 @@ end
 
 module Slack_managment = struct
   include Linexpr_managment
-  include RatOps.ConvenienceOps (Mpqf)
+  include RatOps.ConvenienceOps (Rat)
 
   (** [is_slack t col] is [true] iff column [col] is a slack column. *)
   let is_slack (t: t) (col: int) : bool =
@@ -154,11 +154,11 @@ module Slack_managment = struct
         (*get normalized const*)
         let const = CoeffVector.nth normalized ((CoeffVector.length normalized) - 1) in
         (*Strip constant of info*)
-        let info = CoeffVector.set_nth normalized ((CoeffVector.length normalized) - 1) Mpqf.zero in
+        let info = CoeffVector.set_nth normalized ((CoeffVector.length normalized) - 1) Rat.zero in
         (* Tweak interval *)
-        let interval = RationalInterval.scale (Mpqf.one /: factor) interval in
+        let interval = RationalInterval.scale (Rat.one /: factor) interval in
         (* add the constant into the interval*)
-        let interval = RationalInterval.add_const (Mpqf.neg const) interval in
+        let interval = RationalInterval.add_const (Rat.neg const) interval in
         let find_key_on_info map info = Seq.find (fun (_, v) -> SubPolyDomain.info_equal v info) @@ SubPolyDomain.VarMap.to_seq map in
         match find_key_on_info  d.infos info with 
         | None -> (*There is no slack yet with that info, we insert a new one.*)
@@ -177,8 +177,8 @@ module ExpressionBounds: (SharedFunctions.ConvBounds with type t = VarManagement
 
   (* reduce solves over Q, but the expression is integer-valued. rounding the upper
      bound down and the lower bound up *)
-  let z_floor q = Z.fdiv (Mpqf.get_num q) (Mpqf.get_den q)
-  let z_ceil q = Z.cdiv (Mpqf.get_num q) (Mpqf.get_den q)
+  let z_floor q = Z.fdiv (Rat.get_num q) (Rat.get_den q)
+  let z_ceil q = Z.cdiv (Rat.get_num q) (Rat.get_den q)
 
   (* [None] anywhere in the chain (bot state, non-linear expression, infeasible after
      reduce) means "no bounds": the caller gets [(None, None)]. *)
@@ -189,8 +189,8 @@ module ExpressionBounds: (SharedFunctions.ConvBounds with type t = VarManagement
       let* d = t.d in
       let* v = get_coeff_vec t (Texpr1.to_expr texpr) in
       match to_constant_opt v with
-      | Some c when Z.equal (Mpqf.get_den c) Z.one ->
-        let n = Mpqf.get_num c in
+      | Some c when Z.equal (Rat.get_den c) Z.one ->
+        let n = Rat.get_num c in
         Some (Some n, Some n)
       | Some _ -> None (* non-integral constant *)
       | None ->
@@ -214,7 +214,7 @@ end
 module D =
 struct
   include Printable.Std
-  include RatOps.ConvenienceOps (Mpqf)
+  include RatOps.ConvenienceOps (Rat)
   include VarManagement
   include Linexpr_managment
   include Slack_managment
@@ -355,7 +355,7 @@ same indices. Then it calls SubPolyDomain.widen on the updated subpolyhedra. Ada
     match t.d with
     | None -> t
     | Some d ->
-      let row = CoeffVector.set_nth coeffvector v (Mpqf.neg Mpqf.one) in (* -x zur linexpr hinzufügen; x = linexpr --> 0 = linexpr - x*)
+      let row = CoeffVector.set_nth coeffvector v (Rat.neg Rat.one) in (* -x zur linexpr hinzufügen; x = linexpr --> 0 = linexpr - x*)
       { t with d = Some (SubPolyDomain.add_affeq_row row d) } 
 
 (* reduce in meet tcons *)
@@ -380,13 +380,13 @@ same indices. Then it calls SubPolyDomain.widen on the updated subpolyhedra. Ada
       bounds (INT_MIN <= x <= INT_MAX), which RelationAnalysis re-asserts after every
       assignment -- re-asserting an unchanged bound costs nothing here, while the slack
       path paid a full LP reduce each time. *)
-  let meet_single_var_constraint (t: t) (col: int) (a: Mpqf.t) (c: Mpqf.t)
+  let meet_single_var_constraint (t: t) (col: int) (a: Rat.t) (c: Rat.t)
       (expr_interval: RationalInterval.t) : t =
     match t.d with
     | None -> t
     | Some d ->
       (* a*x + c ∈ I  <=>  x ∈ (I - c) / a  (scale flips the bounds for a < 0) *)
-      let x_interval = RationalInterval.scale (Mpqf.one /: a) (RationalInterval.add_const (Mpqf.neg c) expr_interval) in
+      let x_interval = RationalInterval.scale (Rat.one /: a) (RationalInterval.add_const (Rat.neg c) expr_interval) in
       let old = SubPolyDomain.get_var_intv col d in
       let met = match old with
         | None -> Some x_interval
@@ -408,20 +408,20 @@ same indices. Then it calls SubPolyDomain.widen on the updated subpolyhedra. Ada
     | None -> t
     | Some d ->
       match CoeffVector.nth rhs assigned_dim with
-      | assigned_coeff when assigned_coeff =: Mpqf.zero -> failwith "substitute_expr: assigned variable not in expression"
+      | assigned_coeff when assigned_coeff =: Rat.zero -> failwith "substitute_expr: assigned variable not in expression"
       | assigned_coeff ->
         let substitute_x_by_this = 
           CoeffVector.mapi_f_preserves_zero
             (fun idx coeff ->
-              if idx = assigned_dim then Mpqf.one /: assigned_coeff 
-              else Mpqf.neg (coeff /: assigned_coeff)
+              if idx = assigned_dim then Rat.one /: assigned_coeff 
+              else Rat.neg (coeff /: assigned_coeff)
             ) rhs in
         
         let substitute_in = (fun vec ->
           match CoeffVector.nth vec assigned_dim with
-          | coef when coef =: Mpqf.zero -> vec
+          | coef when coef =: Rat.zero -> vec
           | coef ->
-            let zero_vec = (CoeffVector.set_nth vec assigned_dim Mpqf.zero) in
+            let zero_vec = (CoeffVector.set_nth vec assigned_dim Rat.zero) in
             CoeffVector.map2_f_preserves_zero (fun x s -> x +: coef *: s)  zero_vec substitute_x_by_this
         )
         in
@@ -429,7 +429,7 @@ same indices. Then it calls SubPolyDomain.widen on the updated subpolyhedra. Ada
            interval (its value is unchanged), but the symbolic description is dropped
            and the substituted definition is re-asserted via add_slack_constraint,
            which re-canonicalizes *)
-        let stale, kept = SubPolyDomain.VarMap.partition (fun _ info -> not (CoeffVector.nth info assigned_dim =: Mpqf.zero)) d.infos in
+        let stale, kept = SubPolyDomain.VarMap.partition (fun _ info -> not (CoeffVector.nth info assigned_dim =: Rat.zero)) d.infos in
 
         (* the direct bound of the assigned variable: for x := a*x + c it transforms
            exactly (new x = a*old_x + c); any rhs involving other variables invalidates
@@ -544,14 +544,14 @@ same indices. Then it calls SubPolyDomain.widen on the updated subpolyhedra. Ada
       | Some v ->
         begin match to_constant_opt v, Tcons1.get_typ tcons1 with
           (* expr collapses to a constant c: immediate feasibility check *)
-          | Some c, EQ    -> if c <>: Mpqf.zero then bot_env else t
-          | Some c, SUPEQ -> if c <:  Mpqf.zero then bot_env else t
-          | Some c, SUP   -> if c <=: Mpqf.zero then bot_env else t
-          | Some c, DISEQ -> if c =:  Mpqf.zero then bot_env else t
+          | Some c, EQ    -> if c <>: Rat.zero then bot_env else t
+          | Some c, SUPEQ -> if c <:  Rat.zero then bot_env else t
+          | Some c, SUP   -> if c <=: Rat.zero then bot_env else t
+          | Some c, DISEQ -> if c =:  Rat.zero then bot_env else t
           (* expr has variables: record it (inconsistency caught later, at rref) *)
           | None, EQ            -> reduce_to_bot { t with d = Some (SubPolyDomain.add_affeq_row v (Option.get t.d)) }
           | None, SUPEQ ->
-            let expr_interval = RationalInterval.of_bounds ~lower:(Some Mpqf.zero) ~upper:None in
+            let expr_interval = RationalInterval.of_bounds ~lower:(Some Rat.zero) ~upper:None in
             begin match to_single_var_opt v with
               | Some (col, a, c) when col < Environment.size t.env ->
                 (* single-variable inequality (e.g. a type bound): plain interval on the
@@ -564,11 +564,11 @@ same indices. Then it calls SubPolyDomain.widen on the updated subpolyhedra. Ada
                integer-valued: scale by the lcm of the coefficient denominators
                (an equivalent constraint) to clear fractions first *)
             let lcm = List.fold_left (fun acc (_, c) ->
-              Z.lcm acc (Mpqf.get_den c)
+              Z.lcm acc (Rat.get_den c)
               ) Z.one (CoeffVector.to_sparse_list v)
             in
-            let v = if Z.equal lcm Z.one then v else CoeffVector.map_f_preserves_zero (fun c -> c *: mpqf_of_z lcm) v in
-            let expr_interval = RationalInterval.of_bounds ~lower:(Some Mpqf.one) ~upper:None in
+            let v = if Z.equal lcm Z.one then v else CoeffVector.map_f_preserves_zero (fun c -> c *: rat_of_z lcm) v in
+            let expr_interval = RationalInterval.of_bounds ~lower:(Some Rat.one) ~upper:None in
             begin match to_single_var_opt v with
               | Some (col, a, c) when col < Environment.size t.env ->
                 meet_single_var_constraint t col a c expr_interval

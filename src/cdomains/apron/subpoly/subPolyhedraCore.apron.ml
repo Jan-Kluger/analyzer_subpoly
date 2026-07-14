@@ -1,4 +1,4 @@
-module Mpqf = SharedFunctions.Mpqf
+module Rat = SubRat.Rat
 open Intervalsig
 open OcplibSimplex
 include Batteries
@@ -18,21 +18,19 @@ end
 module Simplex = struct
   (** The number type the solver computes with, for constraint coefficients, bounds and
       solution values alike. ocplib-simplex demands its own [Rationals] interface
-      (extSigs.mli), which Mpqf almost satisfies: this adapter is mostly renames
-      ([mult] = [mul], [minus] = [neg], [sign] = [sgn], ...) plus [floor]/[ceiling]/[is_int],
-      which Mpqf lacks. With rationals we dont have the float imperciscion *)
+      (extSigs.mli), which Rat (zarith's [Q]) almost satisfies: this adapter is mostly
+      renames ([mult] = [mul], [minus] = [neg], ...) plus [floor]/[ceiling]/[is_int].
+      With rationals we dont have the float imperciscion *)
   module LpRat = struct
-    include Mpqf
+    include Rat
     let m_one = mone
-    let sign = sgn
     let is_zero x = equal x zero
     let is_one x = equal x one
     let is_m_one x = equal x m_one
     let mult = mul
     let minus = neg
-    let min a b = if cmp a b <= 0 then a else b
+    (* [min] comes from [include Rat] (zarith provides it) *)
     let is_int x = Z.equal (get_den x) Z.one
-    let of_z z = of_mpz @@ Z_mlgmpidl.mpzf_of_z z
     let floor x = of_z @@ Z.fdiv (get_num x) (get_den x)
     let ceiling x = of_z @@ Z.cdiv (get_num x) (get_den x)
   end
@@ -69,17 +67,19 @@ open Simplex
 
 
 (** Internal representation of a consistent subpolyhedron. *)
-module SubPoly (Var : Var) (I : IntervalSig with type bound = Mpqf.t) = struct
+module SubPoly (Var : Var) (I : IntervalSig with type bound = Rat.t) = struct
   (* Reuse the SparseVector and ListMatrix modules from the AffineEqualityDomain. *)
-  include RatOps.ConvenienceOps (Mpqf)
+  include RatOps.ConvenienceOps (Rat)
 
   module Vector = SparseVector.SparseVector
-  module CoeffVector = Vector(Mpqf)
-  module Matrix =
-    AffineEqualityDomain.AffineEqualityMatrix
-      (Vector)
-      (ListMatrix.ListMatrix) (*Question: do we actually use this, if we just use the Matrix and Vector implementations? *)
-        (*QUESTION: Why don't we use the affineEqualityDenseDomain?*)
+  module CoeffVector = Vector(Rat)
+  (* Own instantiation instead of AffineEqualityDomain.AffineEqualityMatrix: that one
+     hardcodes Mpqf as the number type, we compute over zarith's Q. *)
+  module Matrix = struct
+    include ListMatrix.ListMatrix (Rat) (Vector)
+    let dim_add (ch: Apron.Dim.change) m =
+      add_empty_columns m ch.dim
+  end
   (* Map keyed by variables. *)
   module VarMap = Map.Make(Var)
   module IntMap = Map.Make (Int)
@@ -169,10 +169,10 @@ module SubPoly (Var : Var) (I : IntervalSig with type bound = Mpqf.t) = struct
   let info_equal (a : info) (b : info) : bool = 
             let rec cmp_entries a_entries b_entries = 
           match a_entries, b_entries with 
-          | (_, val1) :: r1, _ when val1 = Mpqf.zero -> cmp_entries r1 b_entries
-          | _, (_, val2) :: r2 when val2 = Mpqf.zero -> cmp_entries a_entries r2
+          | (_, val1) :: r1, _ when val1 = Rat.zero -> cmp_entries r1 b_entries
+          | _, (_, val2) :: r2 when val2 = Rat.zero -> cmp_entries a_entries r2
           | (idx1, val1) :: r1, (idx2, val2) :: r2 -> 
-            idx1 = idx2 && Mpqf.equal val1 val2 && cmp_entries r1 r2
+            idx1 = idx2 && Rat.equal val1 val2 && cmp_entries r1 r2
           | [], [] -> true
           | _ -> false 
         in
@@ -187,7 +187,7 @@ module SubPoly (Var : Var) (I : IntervalSig with type bound = Mpqf.t) = struct
     let widen v = CoeffVector.insert_zero_at_indices v [(slack_col, 1)] 1 in
     let affeq = Matrix.add_empty_columns t.affeq [| slack_col |] in
     let expr  = widen expr in                                          (* slack col now 0, const shifted right *)
-    let row   = CoeffVector.set_nth expr slack_col (Mpqf.neg Mpqf.one) in (* expr - slack = 0 *)
+    let row   = CoeffVector.set_nth expr slack_col (Rat.neg Rat.one) in (* expr - slack = 0 *)
     let key   = Var.to_t slack_col in
     { affeq     = Matrix.append_row affeq row;
       infos     = VarMap.add key expr (VarMap.map widen t.infos);
@@ -226,7 +226,7 @@ module SubPoly (Var : Var) (I : IntervalSig with type bound = Mpqf.t) = struct
     let new_intervals = remove_and_shift_keys t.intervals in
     let new_var_intervals = remove_and_shift_keys t.var_intervals in
     let new_infos =
-      let keep info = List.for_all (fun idx -> CoeffVector.nth info idx =: Mpqf.zero) dim_list in
+      let keep info = List.for_all (fun idx -> CoeffVector.nth info idx =: Rat.zero) dim_list in
       VarMap.fold (fun var info acc ->
         if Set.mem var dim_set || not (keep info)
         then acc
@@ -241,13 +241,13 @@ module SubPoly (Var : Var) (I : IntervalSig with type bound = Mpqf.t) = struct
   (* ---- Canonicalization of infos (moved here from the domain so it can be reused
           by reclamation in forget_vars and, later, by Step 3 of join/widen). ---- *)
 
-  let mpqf_of_z z = Mpqf.of_mpz @@ Z_mlgmpidl.mpzf_of_z z
+  let rat_of_z = Rat.of_z
 
   (** [gcd_list v] gcd of all stored (non-zero) coefficient numerators. *)
   let gcd_list (v: info) : Z.t =
     let gcd =
       CoeffVector.to_sparse_list v
-      |> List.fold_left (fun acc (_, c) -> Z.gcd acc (Mpqf.get_num c)) Z.zero
+      |> List.fold_left (fun acc (_, c) -> Z.gcd acc (Rat.get_num c)) Z.zero
     in
     (* an all-zero vector has gcd 0, so fall back to 1 to make dividing a no-op *)
     if Z.equal gcd Z.zero then Z.one else gcd
@@ -255,22 +255,22 @@ module SubPoly (Var : Var) (I : IntervalSig with type bound = Mpqf.t) = struct
   (** [lcm_den_list v] lcm of the denominators of every stored coefficient. *)
   let lcm_den_list (v: info) : Z.t =
     CoeffVector.to_sparse_list v
-    |> List.fold_left (fun acc (_, c) -> Z.lcm acc (Mpqf.get_den c)) Z.one
+    |> List.fold_left (fun acc (_, c) -> Z.lcm acc (Rat.get_den c)) Z.one
 
   (** [normalize_info v] returns [(v / factor, factor)] where [factor = sign * gcd / lcm]:
       it clears the common content and denominators and flips the sign so the leading
       (lowest-index) coefficient is positive. *)
-  let normalize_info (v: info) : info * Mpqf.t =
+  let normalize_info (v: info) : info * Rat.t =
     let gcd = gcd_list v in
     let lcm = lcm_den_list v in
     let sign = match CoeffVector.find_first_non_zero v with
-      | Some (_, leading) when leading <: Mpqf.zero -> Mpqf.mone
-      | _ -> Mpqf.one
+      | Some (_, leading) when leading <: Rat.zero -> Rat.mone
+      | _ -> Rat.one
     in
-    let factor = sign *: mpqf_of_z gcd /: mpqf_of_z lcm in
+    let factor = sign *: rat_of_z gcd /: rat_of_z lcm in
     CoeffVector.map_f_preserves_zero (fun c -> c /: factor) v, factor
 
-  let negate v = CoeffVector.map_f_preserves_zero Mpqf.neg v
+  let negate v = CoeffVector.map_f_preserves_zero Rat.neg v
 
   (** [recover_def_from_non_info_intv var t] searches the matrix for a row in which [var]
       occurs with a non-zero coefficient and every other non-zero entry is a program
@@ -279,11 +279,11 @@ module SubPoly (Var : Var) (I : IntervalSig with type bound = Mpqf.t) = struct
       constant kept) is returned as [Some]. Returns [None] when no such row exists. *)
   let recover_def_from_non_info_intv (var : int) (subpoly : t) : info option =
     let only_prog_vars v  = List.for_all (fun (idx, _) -> (not @@ (VarMap.mem idx subpoly.intervals)) || (idx = var)) (CoeffVector.to_sparse_list v) in
-    match Matrix.find_opt (fun vec -> ((CoeffVector.nth vec var) <>: Mpqf.zero) && only_prog_vars vec) subpoly.affeq with
+    match Matrix.find_opt (fun vec -> ((CoeffVector.nth vec var) <>: Rat.zero) && only_prog_vars vec) subpoly.affeq with
     | None -> None
     | Some vec ->
       let coeff = CoeffVector.nth vec var in
-      Some (CoeffVector.map (fun (i, c) -> (i, Mpqf.neg (c /: coeff))) (CoeffVector.set_nth vec var Mpqf.zero))
+      Some (CoeffVector.map (fun (i, c) -> (i, Rat.neg (c /: coeff))) (CoeffVector.set_nth vec var Rat.zero))
 
   (** [canonicalize_slack slack raw_def t] rescales the existing slack column [slack] so
       that the slack variable becomes equal to the canonical (gcd/lcm/sign-normalized,
@@ -307,10 +307,10 @@ module SubPoly (Var : Var) (I : IntervalSig with type bound = Mpqf.t) = struct
     let normalized, factor = normalize_info raw_def in
     let const_idx = CoeffVector.length normalized - 1 in
     let const = CoeffVector.nth normalized const_idx in
-    let info = CoeffVector.set_nth normalized const_idx Mpqf.zero in
+    let info = CoeffVector.set_nth normalized const_idx Rat.zero in
     let adapt_row row =
       let c = CoeffVector.nth row slack in
-      if c =: Mpqf.zero then row
+      if c =: Rat.zero then row
       else
         let row = CoeffVector.set_nth row slack (c *: factor) in
         let cidx = CoeffVector.length row - 1 in
@@ -318,7 +318,7 @@ module SubPoly (Var : Var) (I : IntervalSig with type bound = Mpqf.t) = struct
     in
     let new_affeq = Matrix.map adapt_row t.affeq in
     let old_iv = VarMap.find slack t.intervals in
-    let new_iv = I.add_const (Mpqf.neg const) (I.scale (Mpqf.one /: factor) old_iv) in
+    let new_iv = I.add_const (Rat.neg const) (I.scale (Rat.one /: factor) old_iv) in
     ({ t with affeq = new_affeq;
        intervals = VarMap.add slack new_iv t.intervals;
        infos = VarMap.add slack info t.infos;
@@ -334,7 +334,7 @@ module SubPoly (Var : Var) (I : IntervalSig with type bound = Mpqf.t) = struct
     | None -> None
     | Some raw_def ->
       let const_idx = CoeffVector.length raw_def - 1 in
-      let has_prog_term = List.exists (fun (i, c) -> i <> const_idx && c <>: Mpqf.zero) (CoeffVector.to_sparse_list raw_def) in
+      let has_prog_term = List.exists (fun (i, c) -> i <> const_idx && c <>: Rat.zero) (CoeffVector.to_sparse_list raw_def) in
       if not has_prog_term then None
       else Some (canonicalize_slack slack raw_def t)
 
@@ -467,7 +467,7 @@ let string_of (t: t) =
   exception Infeasible
 
   (** A non-strict solver bound (we carry no explanations). *)
-  let lp_bound (v: Mpqf.t) : Core.bound = { Core.bvalue = Core.R2.of_r v; explanation = () }
+  let lp_bound (v: Rat.t) : Core.bound = { Core.bvalue = Core.R2.of_r v; explanation = () }
 
   (** [assert_row (env, i) row] asserts a matrix row [a_1*v_1 + ... + a_k*v_k + c = 0]
       as [sum in [-c, -c]] in the solver. Multi-variable rows are registered under the
@@ -481,18 +481,18 @@ let string_of (t: t) =
     let coeffs, consts = List.partition (fun (j, _) -> j <> const_idx) (CoeffVector.to_sparse_list row) in
 
     (* get the const from the row *)
-    let c = match consts with [] -> Mpqf.zero | (_, c) :: _ -> c in
+    let c = match consts with [] -> Rat.zero | (_, c) :: _ -> c in
 
     match coeffs with
-    | [] -> if c =: Mpqf.zero then (env, i) else raise Infeasible (* row reads 0 = c with c <> 0 *)
+    | [] -> if c =: Rat.zero then (env, i) else raise Infeasible (* row reads 0 = c with c <> 0 *)
     | [(j, a)] ->
       (* We only have one coefficient (for some reason poly is 2 or more coefficients) 
       add degenerate interval to simplex *)
-      let b = lp_bound (Mpqf.neg c /: a) in (* a*v_j + c = 0  <=>  v_j = -c/a *)
+      let b = lp_bound (Rat.neg c /: a) in (* a*v_j + c = 0  <=>  v_j = -c/a *)
       (fst @@ Assert.var env ~min:b ~max:b j, i)
     | _ ->
       (* insert equation with equality *)
-      let b = lp_bound (Mpqf.neg c) in
+      let b = lp_bound (Rat.neg c) in
       (fst @@ Assert.poly env (Core.P.from_list coeffs) ~min:b ~max:b (-(i + 1)), i + 1)
 
   (** [assert_interval var intv env] asserts the finite bounds of [intv] on [var]. *)
@@ -505,7 +505,7 @@ let string_of (t: t) =
   (** [optimize env col coeff] is the optimum of [coeff * v_col]: [Some m] is the exact
       maximum, [None] means unbounded. A strict optimum [m - eps] is reported with value
       [m], which is still a sound bound. Raises [Infeasible] on an inconsistent system. *)
-  let optimize (env: Core.t) (terms : (int * Mpqf.t) list) : Core.t * Mpqf.t option =
+  let optimize (env: Core.t) (terms : (int * Rat.t) list) : Core.t * Rat.t option =
     let env, opt = Solve.maximize env (Core.P.from_list terms) in
     match Result.get opt env with
     | Core.Max (mx, _) -> env, Some (Lazy.force mx).Core.max_v.Core.bvalue.Core.R2.v
@@ -519,10 +519,10 @@ let string_of (t: t) =
     (* get collumn to refine *)
     let col = Var.to_int var in
     (* optimze to get upper and lower *)
-    let env, upper = optimize env [(col, Mpqf.one)] in
-    let env, neg_lower = optimize env [(col, Mpqf.mone)] in
+    let env, upper = optimize env [(col, Rat.one)] in
+    let env, neg_lower = optimize env [(col, Rat.mone)] in
     (* revert negation trick *)
-    let lower = Option.map Mpqf.neg neg_lower in
+    let lower = Option.map Rat.neg neg_lower in
     (* meet with old interval to get the new bounds for the new interval *)
     match I.meet intv (I.of_bounds ~lower ~upper) with
     | None -> raise Infeasible
@@ -651,7 +651,7 @@ let string_of (t: t) =
         let new_var = if IntMap.mem v mapping then IntMap.find v mapping else (if v = (CoeffVector.length vec) - 1 then len - 1 else v) in
         CoeffVector.set_nth acc new_var c in
       let res = List.fold_left helper (CoeffVector.of_sparse_list len []) (CoeffVector.to_sparse_list vec) in
-      if const = Mpqf.zero then res else CoeffVector.set_nth res ((CoeffVector.length res) - 1) const 
+      if const = Rat.zero then res else CoeffVector.set_nth res ((CoeffVector.length res) - 1) const 
     in
     (*[remap_slacks a mapping const_idx] remaps the slack variables of a subpolyhedra a using the mapping from [get_mapping a b]. *)
     let remap_slacks (a : t) (mapping : int IntMap.t) (len : int) : t =
@@ -690,7 +690,7 @@ let string_of (t: t) =
     let inject_slack var info x =
       let new_intervals = VarMap.add var I.top x.intervals in
       let new_infos = VarMap.add var info x.infos in
-      let new_affeq = Matrix.append_row x.affeq (CoeffVector.set_nth info var (Mpqf.of_int (-1))) in
+      let new_affeq = Matrix.append_row x.affeq (CoeffVector.set_nth info var (Rat.of_int (-1))) in
       {affeq = new_affeq; infos = new_infos; intervals = new_intervals;
        var_intervals = x.var_intervals; reduced = false} in
     let new_a = VarMap.fold (fun var info acc -> if VarMap.mem var a.infos then acc else inject_slack var info acc ) b.infos a in
@@ -701,7 +701,7 @@ let string_of (t: t) =
     let inject_slack var info x =
       let new_intervals = VarMap.add var I.top x.intervals in
       let new_infos = VarMap.add var info x.infos in
-      let new_affeq = Matrix.append_row x.affeq (CoeffVector.set_nth info var (Mpqf.of_int (-1))) in
+      let new_affeq = Matrix.append_row x.affeq (CoeffVector.set_nth info var (Rat.of_int (-1))) in
       {affeq = new_affeq; infos = new_infos; intervals = new_intervals;
        var_intervals = x.var_intervals; reduced = false} in
     (*let new_a = VarMap.fold (fun var info acc -> if VarMap.mem var a.infos then acc else inject_slack var info acc ) b.infos a in*)
@@ -753,8 +753,8 @@ let string_of (t: t) =
     | [] -> env, I.top
     | terms ->
       let env, upper = optimize env terms in
-      let env, neg_lower = optimize env (List.map (fun (i, c) -> (i, Mpqf.neg c)) terms) in
-      env, I.of_bounds ~lower:(Option.map Mpqf.neg neg_lower) ~upper
+      let env, neg_lower = optimize env (List.map (fun (i, c) -> (i, Rat.neg c)) terms) in
+      env, I.of_bounds ~lower:(Option.map Rat.neg neg_lower) ~upper
 
   (** [s_kappa t row] is the program-variable linear form [s_kappa] equivalent to the
       equality [row]: the constant is dropped and every slack column [beta] is replaced by
@@ -784,7 +784,7 @@ let string_of (t: t) =
       width and carry no constant. *)
   let add_recovered_slack ~(on_existing : I.t -> I.t -> I.t option) ~(slack_col : int) (linform : info) (iv : I.t) (t : t) : t * bool =
     let info, factor = normalize_info linform in
-    let iv' = I.scale (Mpqf.one /: factor) iv in
+    let iv' = I.scale (Rat.one /: factor) iv in
     match Seq.find (fun (_, i) -> info_equal i info) (VarMap.to_seq t.infos) with
     | Some (k, _) ->
       ((match on_existing (VarMap.find k t.intervals) iv' with
@@ -805,7 +805,7 @@ let string_of (t: t) =
           | None -> v
           | Some (pivot_col, _) -> (* rref: pivot coefficient is 1 *)
             let c = CoeffVector.nth v pivot_col in
-            if c =: Mpqf.zero then v
+            if c =: Rat.zero then v
             else CoeffVector.map2_f_preserves_zero (fun a b -> a -: c *: b) v pivot_row)
         row joined_rref
     in
@@ -825,7 +825,7 @@ let string_of (t: t) =
         in
         let (l1, u1) = I.bounds acc and (l2, u2) = I.bounds ci in
         I.of_bounds ~lower:(add l1 l2) ~upper:(add u1 u2))
-      (I.of_bounds ~lower:(Some Mpqf.zero) ~upper:(Some Mpqf.zero))
+      (I.of_bounds ~lower:(Some Rat.zero) ~upper:(Some Rat.zero))
       (CoeffVector.to_sparse_list s)
 
   (** [recover_step3 ~combine ~on_existing ~sources x y joined] adds the recovered
@@ -946,9 +946,9 @@ let string_of (t: t) =
       the solver environment so consecutive calls reuse the pivoted tableau. *)
   let entailed_bounds (env: Core.t) (info: info) : Core.t * I.t =
     let info_const = CoeffVector.nth info (CoeffVector.length info - 1) in
-    let info_terms = CoeffVector.to_sparse_list (CoeffVector.set_nth info (CoeffVector.length info - 1) Mpqf.zero) in
+    let info_terms = CoeffVector.to_sparse_list (CoeffVector.set_nth info (CoeffVector.length info - 1) Rat.zero) in
     let env, upper = optimize env info_terms in
-    let env, neg_lower = optimize env (List.map (fun (i, c) -> (i, Mpqf.neg c)) info_terms) in
+    let env, neg_lower = optimize env (List.map (fun (i, c) -> (i, Rat.neg c)) info_terms) in
     env, I.of_bounds ~lower:(Option.map (fun m -> info_const -: m) neg_lower)
       ~upper:(Option.map (fun m -> m +: info_const) upper)
 
