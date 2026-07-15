@@ -108,8 +108,6 @@ module SubPoly (Var : Var) (I : IntervalSig with type bound = Mpqf.t) = struct
   } [@@deriving eq, ord, hash]
 
 
-  (* Everything here is TODO, it has AI generated placeholds so i could run the regtest *)
-
   let copy = Fun.id
 
   let empty () = { affeq = Matrix.empty (); intervals = VarMap.empty; infos = VarMap.empty }
