@@ -126,11 +126,7 @@ module Linexpr_managment = struct
           begin match multiply (convert_texpr e1) (convert_texpr e2) with
             | Some v -> v
             | None -> raise NotLinearExpr end
-        | Binop (Div, e1, e2, _, _) ->
-          let v1 = convert_texpr e1 in
-          begin match to_constant_opt (convert_texpr e2) with
-            | Some c when not (c =: Mpqf.zero) -> CoeffVector.map_f_preserves_zero (fun x -> x /: c) v1
-            | _ -> raise NotLinearExpr end
+        (*Future TODO: sound division handling, not supported yet.*)
         | _  -> raise NotLinearExpr end
     in match convert_texpr texp with
     | exception NotLinearExpr -> None
