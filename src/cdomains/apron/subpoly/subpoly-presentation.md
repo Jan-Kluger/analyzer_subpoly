@@ -247,6 +247,7 @@ leq a b =
 The paper does not specify a narrow algorithm.
 Variable removal forced an invention the paper never names: **non-info slacks** -
 interval survives, info is dropped, defining row is eliminated.
+**maybe mention bugs in listMatrix, tbd!**
 
 ---
 ## Outlook
