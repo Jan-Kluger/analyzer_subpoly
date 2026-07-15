@@ -108,10 +108,19 @@ module Linexpr_managment = struct
           begin match multiply (convert_texpr e1) (convert_texpr e2) with
             | Some v -> v
             | None -> raise NotLinearExpr end
-        | Binop (Div, e1, e2, _, _) ->
+        | Binop (Div, e1, e2, Real, _) ->
+          (* real division is exact, so a constant divisor keeps the expression linear *)
           let v1 = convert_texpr e1 in
           begin match to_constant_opt (convert_texpr e2) with
             | Some c when not (c =: Mpqf.zero) -> CoeffVector.map_f_preserves_zero (fun x -> x /: c) v1
+            | _ -> raise NotLinearExpr end
+        | Binop (Div, e1, e2, Int, Zero) ->
+          (* C integer division truncates toward zero (C99 6.5.5), which is not linear
+             in the numerator; only constant / constant can be folded exactly *)
+          begin match to_constant_opt (convert_texpr e1), to_constant_opt (convert_texpr e2) with
+            | Some c1, Some c2 when not (c2 =: Mpqf.zero) ->
+              let q = c1 /: c2 in
+              CoeffVector.set_nth zero_vec const_idx (mpqf_of_z (Z.div (Mpqf.get_num q) (Mpqf.get_den q)))
             | _ -> raise NotLinearExpr end
         | _  -> raise NotLinearExpr end
     in match convert_texpr texp with
