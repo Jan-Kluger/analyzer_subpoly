@@ -523,8 +523,8 @@ let string_of (t: t) =
     Some {affeq = new_affeq; intervals = new_intervals; infos = x.infos}
 
   let recover_def_from_non_info_intv (var : int) (subpoly : t) : info option=
-    let only_prog_vars v  = List.for_all (fun (idx, _) -> (not @@ (VarMap.mem idx subpoly.intervals)) || (idx = var)) (CoeffVector.to_sparse_list v) in
-    match Matrix.find_opt (fun vec -> ((CoeffVector.nth vec var) <>: Mpqf.zero) && only_prog_vars vec) subpoly.affeq with 
+    let affeq_without_slacks = VarMap.fold (fun v _ acc -> if v = var then acc else  Matrix.reduce_col acc v) subpoly.intervals subpoly.affeq in
+    match Matrix.find_opt (fun vec -> ((CoeffVector.nth vec var) <>: Mpqf.zero)) affeq_without_slacks with 
     | None -> None
     | Some vec ->
       let coeff = CoeffVector.nth vec var in
