@@ -1,0 +1,77 @@
+# bench5_query_heavy.c
+# goblint --set ana.activated[+] subpoly --set sem.int.signed_overflow assume_none bench5_query_heavy.c
+# date: 2026-07-14 17:44:45
+
+[Success][Assert] Assertion "lim >= 0" will succeed (bench5_query_heavy.c:31:7-31:32)
+[Success][Assert] Assertion "lim <= 1000" will succeed (bench5_query_heavy.c:32:7-32:35)
+[Success][Assert] Assertion "acc >= 0" will succeed (bench5_query_heavy.c:33:7-33:32)
+[Success][Assert] Assertion "acc <= 1000" will succeed (bench5_query_heavy.c:34:7-34:35)
+[Success][Assert] Assertion "u1 >= u0" will succeed (bench5_query_heavy.c:35:7-35:32)
+[Success][Assert] Assertion "u1 <= u0 + 20" will succeed (bench5_query_heavy.c:36:7-36:37)
+[Success][Assert] Assertion "u2 >= u0" will succeed (bench5_query_heavy.c:37:7-37:32)
+[Success][Assert] Assertion "u2 <= u0 + 40" will succeed (bench5_query_heavy.c:38:7-38:37)
+[Success][Assert] Assertion "u3 >= u1" will succeed (bench5_query_heavy.c:39:7-39:32)
+[Success][Assert] Assertion "u3 <= u1 + 40" will succeed (bench5_query_heavy.c:40:7-40:37)
+[Success][Assert] Assertion "u4 >= u2" will succeed (bench5_query_heavy.c:41:7-41:32)
+[Success][Assert] Assertion "u4 <= u2 + 40" will succeed (bench5_query_heavy.c:42:7-42:37)
+[Success][Assert] Assertion "u5 >= u3" will succeed (bench5_query_heavy.c:43:7-43:32)
+[Success][Assert] Assertion "u5 <= u3 + 40" will succeed (bench5_query_heavy.c:44:7-44:37)
+[Success][Assert] Assertion "u6 >= u4" will succeed (bench5_query_heavy.c:45:7-45:32)
+[Success][Assert] Assertion "u6 <= u4 + 40" will succeed (bench5_query_heavy.c:46:7-46:37)
+[Success][Assert] Assertion "u7 >= u5" will succeed (bench5_query_heavy.c:47:7-47:32)
+[Success][Assert] Assertion "u7 <= u5 + 40" will succeed (bench5_query_heavy.c:48:7-48:37)
+[Success][Assert] Assertion "u7 <= 190" will succeed (bench5_query_heavy.c:49:7-49:33)
+[Success][Assert] Assertion "u7 >= 0" will succeed (bench5_query_heavy.c:50:7-50:31)
+[Success][Assert] Assertion "cnt <= 101" will succeed (bench5_query_heavy.c:57:7-57:34)
+[Success][Assert] Assertion "acc <= 1000" will succeed (bench5_query_heavy.c:58:7-58:35)
+[Success][Assert] Assertion "u7 - u0 >= 0" will succeed (bench5_query_heavy.c:61:5-61:34)
+[Success][Assert] Assertion "u7 - u0 <= 140" will succeed (bench5_query_heavy.c:62:5-62:36)
+[Info][Deadcode] Logical lines of code (LLoC) summary:
+  live: 38
+  dead: 0
+  total lines: 38
+[Warning][Deadcode][CWE-570] condition 'acc > 1000' is always false (bench5_query_heavy.c:25:11-25:21)
+[Warning][Deadcode][CWE-570] condition 'lim < 0' is always false (bench5_query_heavy.c:28:11-28:18)
+[Warning][Deadcode][CWE-570] condition 'lim > 1000' is always false (bench5_query_heavy.c:29:11-29:21)
+
+[Info] vars = 80    evals = 303    narrow_reuses = 1
+
+[Info] Timings:
+                                  cputime   walltime   allocated   count
+Default                            1.345s     1.354s   2661.50MB      1×
+  preprocess                         0.095s     0.063s      0.00MB      1×
+  FrontC                             0.000s     0.000s      0.54MB      2×
+  Cabs2cil                           0.000s     0.000s      1.27MB      2×
+  mergeCIL                           0.002s     0.002s      1.18MB      1×
+  analysis                           1.246s     1.247s   2656.66MB      1×
+    createCFG                          0.000s     0.000s      0.89MB      1×
+      handle                             0.000s     0.000s      0.64MB      3×
+      iter_connect                       0.000s     0.000s      0.21MB      3×
+        computeSCCs                        0.000s     0.000s      0.17MB      3×
+    global_inits                       0.000s     0.000s      0.04MB      1×
+    reachability                       0.000s     0.000s      0.00MB      1×
+    solving                            1.245s     1.246s   2653.36MB      1×
+      S.Dom.equal                        0.000s     0.001s      0.11MB    304×
+      cheap_full_reach                   0.000s     0.000s      0.00MB      1×
+      postsolver                         0.239s     0.239s    530.66MB      1×
+        postsolver_iter                    0.239s     0.239s    530.61MB      1×
+    warn_global                        0.000s     0.000s      0.36MB      1×
+    result output                      0.000s     0.000s      0.00MB      1×
+        1.36 real         1.31 user         0.04 sys
+            35684352  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               14813  page reclaims
+                 772  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  11  voluntary context switches
+                 129  involuntary context switches
+         20040572012  instructions retired
+          4555375917  cycles elapsed
+            23871848  peak memory footprint

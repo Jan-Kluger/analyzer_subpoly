@@ -1,0 +1,53 @@
+# bench1_many_vars.c
+# goblint --set ana.activated[+] subpoly --set sem.int.signed_overflow assume_none bench1_many_vars.c
+# date: 2026-07-14 17:38:34
+
+[Success][Assert] Assertion "(a3 - a2) + a1 == 0" will succeed (bench1_many_vars.c:41:3-41:37)
+[Success][Assert] Assertion "(b1 + a7) - b0 == 0" will succeed (bench1_many_vars.c:42:3-42:37)
+[Success][Assert] Assertion "(c2 + c0) - c1 == 0" will succeed (bench1_many_vars.c:43:3-43:37)
+[Info][Deadcode] Logical lines of code (LLoC) summary:
+  live: 33
+  dead: 0
+  total lines: 33
+
+[Info] vars = 56    evals = 154    narrow_reuses = 1
+
+[Info] Timings:
+                                  cputime   walltime   allocated   count
+Default                            1.424s     1.438s   2832.55MB      1×
+  preprocess                         0.102s     0.067s      0.00MB      1×
+  FrontC                             0.001s     0.001s      0.51MB      2×
+  Cabs2cil                           0.000s     0.000s      1.21MB      2×
+  mergeCIL                           0.001s     0.001s      1.17MB      1×
+  analysis                           1.318s     1.318s   2827.91MB      1×
+    createCFG                          0.000s     0.000s      0.73MB      1×
+      handle                             0.000s     0.000s      0.49MB      3×
+      iter_connect                       0.000s     0.000s      0.20MB      3×
+        computeSCCs                        0.000s     0.000s      0.17MB      3×
+    global_inits                       0.000s     0.000s      0.04MB      1×
+    reachability                       0.000s     0.000s      0.00MB      1×
+    solving                            1.317s     1.318s   2825.12MB      1×
+      S.Dom.equal                        0.000s     0.000s      0.06MB    155×
+      cheap_full_reach                   0.000s     0.000s      0.00MB      1×
+      postsolver                         0.466s     0.466s    975.73MB      1×
+        postsolver_iter                    0.466s     0.466s    975.71MB      1×
+    warn_global                        0.000s     0.000s      0.01MB      1×
+    result output                      0.000s     0.000s      0.00MB      1×
+        1.45 real         1.38 user         0.05 sys
+            37453824  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               14927  page reclaims
+                 774  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  11  voluntary context switches
+                 300  involuntary context switches
+         21980707078  instructions retired
+          4960252491  cycles elapsed
+            25608552  peak memory footprint

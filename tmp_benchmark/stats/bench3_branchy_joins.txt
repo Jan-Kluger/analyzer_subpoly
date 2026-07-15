@@ -1,0 +1,54 @@
+# bench3_branchy_joins.c
+# goblint --set ana.activated[+] subpoly --set sem.int.signed_overflow assume_none bench3_branchy_joins.c
+# date: 2026-07-14 17:38:42
+
+[Success][Assert] Assertion "x - y == 0" will succeed (bench3_branchy_joins.c:33:3-33:30)
+[Success][Assert] Assertion "z == 0" will succeed (bench3_branchy_joins.c:34:3-34:26)
+[Warning][Assert] Assertion "d == 1" is unknown. (bench3_branchy_joins.c:35:3-35:26)
+[Success][Assert] Assertion "s == 0" will succeed (bench3_branchy_joins.c:36:3-36:26)
+[Info][Deadcode] Logical lines of code (LLoC) summary:
+  live: 26
+  dead: 0
+  total lines: 26
+
+[Info] vars = 91    evals = 293    narrow_reuses = 1
+
+[Info] Timings:
+                                  cputime   walltime   allocated   count
+Default                            0.386s     0.404s    961.59MB      1×
+  preprocess                         0.096s     0.065s      0.00MB      1×
+  FrontC                             0.000s     0.001s      0.61MB      2×
+  Cabs2cil                           0.001s     0.001s      1.28MB      2×
+  mergeCIL                           0.001s     0.001s      1.19MB      1×
+  analysis                           0.286s     0.286s    956.62MB      1×
+    createCFG                          0.000s     0.000s      0.89MB      1×
+      handle                             0.000s     0.000s      0.65MB      3×
+      iter_connect                       0.000s     0.000s      0.20MB      3×
+        computeSCCs                        0.000s     0.000s      0.16MB      3×
+    global_inits                       0.000s     0.000s      0.04MB      1×
+    reachability                       0.000s     0.000s      0.00MB      1×
+    solving                            0.286s     0.286s    953.43MB      1×
+      S.Dom.equal                        0.000s     0.000s      0.10MB    294×
+      cheap_full_reach                   0.000s     0.000s      0.00MB      1×
+      postsolver                         0.064s     0.064s    205.59MB      1×
+        postsolver_iter                    0.063s     0.063s    205.54MB      1×
+    warn_global                        0.000s     0.000s      0.25MB      1×
+    result output                      0.000s     0.000s      0.00MB      1×
+        0.45 real         0.35 user         0.05 sys
+            34897920  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               14150  page reclaims
+                1386  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  18  voluntary context switches
+                 600  involuntary context switches
+          4960876684  instructions retired
+          1159195144  cycles elapsed
+            23085416  peak memory footprint

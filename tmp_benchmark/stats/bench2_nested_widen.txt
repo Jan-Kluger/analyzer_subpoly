@@ -1,0 +1,53 @@
+# bench2_nested_widen.c
+# goblint --set ana.activated[+] subpoly --set sem.int.signed_overflow assume_none bench2_nested_widen.c
+# date: 2026-07-14 17:38:39
+
+[Success][Assert] Assertion "si - i == 0" will succeed (bench2_nested_widen.c:47:3-47:31)
+[Success][Assert] Assertion "di == 0" will succeed (bench2_nested_widen.c:48:3-48:27)
+[Success][Assert] Assertion "u1 - di == 0" will succeed (bench2_nested_widen.c:49:3-49:32)
+[Info][Deadcode] Logical lines of code (LLoC) summary:
+  live: 37
+  dead: 0
+  total lines: 37
+
+[Info] vars = 63    evals = 685    narrow_reuses = 47
+
+[Info] Timings:
+                                  cputime   walltime   allocated   count
+Default                            2.180s     2.192s   4929.13MB      1×
+  preprocess                         0.097s     0.063s      0.00MB      1×
+  FrontC                             0.000s     0.000s      0.52MB      2×
+  Cabs2cil                           0.000s     0.000s      1.22MB      2×
+  mergeCIL                           0.001s     0.001s      1.17MB      1×
+  analysis                           2.081s     2.081s   4924.41MB      1×
+    createCFG                          0.000s     0.000s      0.82MB      1×
+      handle                             0.000s     0.000s      0.58MB      3×
+      iter_connect                       0.000s     0.000s      0.20MB      3×
+        computeSCCs                        0.000s     0.000s      0.16MB      3×
+    global_inits                       0.000s     0.000s      0.04MB      1×
+    reachability                       0.000s     0.000s      0.00MB      1×
+    solving                            2.080s     2.080s   4921.49MB      1×
+      S.Dom.equal                        0.001s     0.002s      0.25MB    732×
+      cheap_full_reach                   0.000s     0.000s      0.00MB      1×
+      postsolver                         0.141s     0.141s    314.20MB      1×
+        postsolver_iter                    0.141s     0.141s    314.17MB      1×
+    warn_global                        0.000s     0.000s      0.06MB      1×
+    result output                      0.000s     0.000s      0.00MB      1×
+        2.21 real         2.15 user         0.04 sys
+            36388864  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               14852  page reclaims
+                 772  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  11  voluntary context switches
+                 118  involuntary context switches
+         36722369022  instructions retired
+          7793859423  cycles elapsed
+            24576360  peak memory footprint
