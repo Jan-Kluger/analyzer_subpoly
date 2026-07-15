@@ -79,7 +79,7 @@ Decisions at the start:
 
 
 
-## Agenda (TODO)
+## Outline (TODO)
 
 1. What is Subpoly?
 2. How We Model Subpoly
@@ -129,21 +129,6 @@ Decisions at the start:
 ---
 
 
-## Previous Attempts (is this actually interesting?)
-
-- Earlier approach used **weird slack modelling**
-- [What specifically was weird / what broke]
-- [Why it motivated the redesign]
-
----
-
-## Modelling Improvements
-
-- Introduced a **canonical slack representation**
-- [Before → after comparison]
-- [What this canonical form buys us — uniqueness, simpler ops, etc.]
-
----
 
 ## Reduce
 
