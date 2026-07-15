@@ -18,48 +18,43 @@ and swap `Bla.` / TBD markers for the finished material.
 Leonie Houzer, Yannick Schürmann, Nicolas Roth, Florin-Vlad Sabău  
 16.07.2026 
 
----
-
-# Polyhedra
-
-$a_0 \cdot x_0 + \ldots + a_n \cdot x_n \le c$  
-*e.g.* $-x + 5y - 4z - 9 \le 0$
-
-# Subpolyhedra
-
-<u>idea</u>: combine linear equalities & intervals
-
-linear equalities: $a_0 \cdot x_0 + \ldots + a_n \cdot x_n + c = 0$ $\longrightarrow$ quite cheap to compute
-
-instead of storing  $a_0 \cdot x_0 + \ldots + a_n \cdot x_n \le c$
-we store  $a_0 \cdot x_0 + \ldots + a_n \cdot x_n = \beta$ and $\beta \in [-\infty, c]$.    [$\beta$ is called a slack variable]
-
-In the linear equalities we always have $=0$. Therefore we store
-$a_0 \cdot x_0 + \ldots + a_n \cdot x_n - \beta = 0$ instead of $a_0 \cdot x_0 + \ldots + a_n \cdot x_n = \beta$.
 
 ---
 
+## Polyhedra
+Inequalities of the form: 
+$$\sum a_i x_i \le c$$
 
 
-## What is Subpoly?
+<span style="color: #606060;">*e.g.* $-x + 5y - 4z \le 9$</span>
+
+## Linear Equalities
+Equalities of the form:
+$$(\sum a_i x_i ) +c = 0$$
+
+$\longrightarrow$ quite cheap to compute
+
+
+
+---
+
+## Subpolyhedra
 
 SubPoly = LinEq ⊗ Intv
 Inequalities become **equalities over slack variables + interval bounds**:
 
-$$\textstyle\sum a_i x_i \le c \;\Longleftrightarrow\; \beta = \sum a_i x_i \;\wedge\; \beta \in (-\infty, c]$$
+$$\textcolor{#C2185B}{\sum a_i x_i}  \le \textcolor{green}{c}  \;\Longleftrightarrow\; \textcolor{#C2185B}{\sum a_i x_i} \textcolor{orange}{= \beta} \;\wedge\; \textcolor{orange}{\beta} \in (-\infty, \textcolor{green}{c}]$$
 
-Our state (`subPolyhedraCore`):
+#### Example:
+$$\textstyle \textcolor{#C2185B}{2x +3y -7z} \le \textcolor{green}{67} 
+\;\Longleftrightarrow\;  \textcolor{#C2185B}{2x +3y -7z} \textcolor{orange}{ = \beta}  \;\wedge\; \textcolor{orange}{\beta} \in (-\infty, \textcolor{green}{67}]$$
+ 
+$\longrightarrow$  $\textcolor{orange}{\beta}$ is called a **slack variable**
 
-| Field | Content |
-|---|---|
-| `affeq` | sparse rref matrix of affine equalities (program + slack columns) |
-| `intervals` | slack var → rational interval |
-| `infos` | slack var → canonical defining linear form (`info(β)`) |
+In the linear equalities we always have $=0$. Therefore we store $\sum a_i x_i - \beta = 0$ instead of $\sum a_i x_i = \beta$.
 
 
 ---
-
-
 
 ## Outline
 
@@ -70,71 +65,47 @@ Our state (`subPolyhedraCore`):
   2.1 Benchmarking
   2.2 Deviations and Optimizations
 
-
 ---
 
 # Implementation
 
 ---
 
-
-
-# Our Data type for the subpoly
-
-<u>we need to store:</u>
-
-- the linear equalities $\Rightarrow$ Reuse the matrix from affine equality dense
-- the intervals $\Rightarrow$ Map: maps every slack variable to an interval
-- somehow remember what is a slack variable and for which equality is it $\Rightarrow$ Map: maps every slack variable to an info (basically the row entries)
-
-```ocaml
-type t = {
-  affeq: affeq;
-  intervals: interval_map;
-  infos: info_map;
-}
-```
----
-Decisions at the start:
-- No Apron names for slacks, we need to do all bookkeeping of slacks
-- Reuse the sparse `ListMatrix`/`SparseVector` kit from the affeq domain
-- Use Exact rationals everywhere
-- Canonical infos: gcd/lcm-scaled, sign-normalized
-
-
-
----
-
 ## Our type & early design decisions
 
-```ocaml
-type t = {
-  affeq:     Matrix.t;          (* sparse rref matrix: [prog vars | slack vars | const] *)
-  intervals: I.t VarMap.t;      (* slack var > rational interval            *)
-  infos:     info VarMap.t;     (* slack var > canonical info     *)
-}
-```
+<u>We need to store:</u>
+- the linear equalities
+- the intervals for each slack variable
+- which equality and which slack variable belong together
 
-Decisions at the start:
-
-- No Apron names for slacks, we need to do all bookkeeping of slacks
-- Reuse the sparse `ListMatrix`/`SparseVector` kit from the affeq domain
-- Use Exact rationals everywhere
-- Canonical infos: gcd/lcm-scaled, sign-normalized
 ---
 
+Our type (`subPolyhedraCore`):
+
+| Field | Content |
+|---|---|
+| `affeq` | sparse rref matrix of affine equalities  [prog vars \| slack vars \| const]
+| `intervals` | slack var → rational interval |
+| `infos` | slack var → canonical defining linear form (`info(β)`) |
+
+---
+
+Decisions at the start:
+- No Apron names for slacks, we need to do all bookkeeping of slacks
+- Use Exact rationals everywhere (no float)
 
 
+---
 
 # Functions
 
 - dim_add, dim_remove
 - forget_var
 - assign-Functions + simplify texpr
-- <mark>join</mark>, meet, <mark>leq</mark> + <mark>slack_lce</mark>
-- <mark>widen</mark>, narrow, unify
 - bound_texpr
 - assert_constraint + meet_tcons
+- <mark>join</mark>, meet, <mark>leq</mark> + <mark>slack_lce</mark>
+- <mark>widen</mark>, narrow, unify
 - <mark>reduce</mark>
 
 ---
