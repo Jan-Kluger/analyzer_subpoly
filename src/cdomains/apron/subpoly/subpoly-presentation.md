@@ -148,9 +148,19 @@ Decisions at the start:
 ## Reduce
 
 - Uses **LP (Linear Programming)** to find new bounds
-- ⚠️ Currently **expensive** — [maybe try to find a cheaper approach]
-- Key win: **no imprecision errors** like in the reference paper
-- [Add complexity/cost notes, ideas for optimization]
+- Basic Algorithm:
+  - Setup the simplex, 
+  - Make one run to make sure we are feasable
+  - If feasable, complete run, update all intervals and return new domain
+- Currently **expensive**
+- Key win: **no imprecision errors** like in the reference paper, since we use rationals, not float
+
+---
+## Other Reduction Strategies
+
+- Paper present Linear programming approach (which we went with)
+- Also descibes a "Base exploration approach" which we did not consider
+- Fable branch implements novel approach, which is surprisingly efficient
 
 ---
 
@@ -225,14 +235,38 @@ leq a b =
 
 ---
 
+# Results of our code
 
-## Conclusions & Results
+---
 
-### Benchmarking
+## Profiling Discrepancies
+### Quick fixees
+- Mpqf is FFI to c. In some of th ebenchmarks we spent 60% of the time building numbers
+- Reduction rebuilds on every reduction
+### Significant improvments
+- Batch reductions?
+- Hints provide significant precision boost
 
-- Benchmarks to be presented [tomorrow / insert date]
-- Comparing: **Subpoly** vs **Fable** vs **Poly**
-- [Insert benchmark table / chart here]
+---
+
+# Results of improved code
+### Hotfixed with claude
+
+---
+
+## Fundemental improvments
+- Canonical slack naming
+  - Leads to better and more efficient leq (fails some lattice properties)
+  - We tried this and dropped it, in hindsight could lead to improvments
+- Different reduce algorithm
+  - Only so much can be done with micro optimizations, Algorithm seems just inneficient
+  - Novel fable reduction, Base exploration
+- Better modelling of subpoly with functors 
+  - more modular
+
+---
+
+# Comparisons of *All* Benchmarks
 
 ---
 
@@ -247,17 +281,3 @@ leq a b =
 The paper does not specify a narrow algorithm.
 Variable removal forced an invention the paper never names: **non-info slacks** -
 interval survives, info is dropped, defining row is eliminated.
-
----
-## Outlook
-
-- Bugfixes & efficiency improvements done with Claude's help
-- Take a closer look at **Fable's** approach
-- Hints give a **big boost** :))
-- [Next steps / future work]
-
----
-
-## Questions?
-
-[Contact / links / repo]
