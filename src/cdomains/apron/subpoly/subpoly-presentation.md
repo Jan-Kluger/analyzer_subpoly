@@ -213,8 +213,7 @@ leq a b =
 | Step 3 re-adds "dropped equalities"  | how to compute what the pairwise join dropped |
 
 The paper does not specify a narrow algorithm.
-Variable removal forced an invention the paper never names: **non-info slacks** -
-interval survives, info is dropped, defining row is eliminated.
+Variable removal forced **non-info slacks** - interval survives, info is dropped, defining row is eliminated.
 
 ---
 
