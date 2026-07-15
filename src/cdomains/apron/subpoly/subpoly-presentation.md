@@ -270,13 +270,13 @@ interval survives, info is dropped, defining row is eliminated.
 
 ---
 
-## Fundemental improvments
+## Fundemental improvements
 - Canonical slack naming
   - More efficient leq 
   - Better leq passes more lattice properties together with reclamation
   - We tried this and dropped it, in hindsight could lead to improvments
 - Different reduce algorithm
-  - Only so much can be done with micro optimizations, Algorithm seems just inneficient
+  - Only so much can be done with micro optimizations, Algorithm seems just inefficient
   - Novel fable reduction, Base exploration
 - Better modelling of subpoly with functors 
   - more modular
