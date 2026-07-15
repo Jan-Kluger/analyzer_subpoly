@@ -39,6 +39,46 @@ $a_0 \cdot x_0 + \ldots + a_n \cdot x_n - \beta = 0$ instead of $a_0 \cdot x_0 +
 
 ---
 
+
+
+## What is Subpoly?
+
+SubPoly = LinEq ⊗ Intv
+Inequalities become **equalities over slack variables + interval bounds**:
+
+$$\textstyle\sum a_i x_i \le c \;\Longleftrightarrow\; \beta = \sum a_i x_i \;\wedge\; \beta \in (-\infty, c]$$
+
+Our state (`subPolyhedraCore`):
+
+| Field | Content |
+|---|---|
+| `affeq` | sparse rref matrix of affine equalities (program + slack columns) |
+| `intervals` | slack var → rational interval |
+| `infos` | slack var → canonical defining linear form (`info(β)`) |
+
+
+---
+
+
+
+## Outline
+
+1. Implementation
+  1.1 Type representation
+  1.2 Functions
+2. Evaluation
+  2.1 Benchmarking
+  2.2 Deviations and Optimizations
+
+
+---
+
+# Implementation
+
+---
+
+
+
 # Our Data type for the subpoly
 
 <u>we need to store:</u>
@@ -62,51 +102,6 @@ Decisions at the start:
 - Canonical infos: gcd/lcm-scaled, sign-normalized
 
 
----
-
-# Overview
-
-- dim_add, dim_remove
-- forget_var
-- assign-Functions + simplify texpr
-- <mark>join</mark>, meet, <mark>leq</mark> + <mark>slack_lce</mark>
-- <mark>widen</mark>, narrow, unify
-- bound_texpr
-- assert_constraint + meet_tcons
-- <mark>reduce</mark>
-
----
-
-
-
-## Outline (TODO)
-
-1. What is Subpoly?
-2. How We Model Subpoly
-3. Previous Attempts
-4. Modelling Improvements
-5. Domain Operations (Meet / Join / Reduce / Leq)
-6. Benchmarking
-7. Drawbacks & Troubles
-8. Outlook
-
----
-
-## What is Subpoly?
-
-SubPoly = LinEq ⊗ Intv
-Inequalities become **equalities over slack variables + interval bounds**:
-
-$$\textstyle\sum a_i x_i \le c \;\Longleftrightarrow\; \beta = \sum a_i x_i \;\wedge\; \beta \in (-\infty, c]$$
-
-Our state (`subPolyhedraCore`):
-
-| Field | Content |
-|---|---|
-| `affeq` | sparse rref matrix of affine equalities (program + slack columns) |
-| `intervals` | slack var → rational interval |
-| `infos` | slack var → canonical defining linear form (`info(β)`) |
-
 
 ---
 
@@ -127,6 +122,23 @@ Decisions at the start:
 - Use Exact rationals everywhere
 - Canonical infos: gcd/lcm-scaled, sign-normalized
 ---
+
+
+
+
+# Functions
+
+- dim_add, dim_remove
+- forget_var
+- assign-Functions + simplify texpr
+- <mark>join</mark>, meet, <mark>leq</mark> + <mark>slack_lce</mark>
+- <mark>widen</mark>, narrow, unify
+- bound_texpr
+- assert_constraint + meet_tcons
+- <mark>reduce</mark>
+
+---
+
 
 
 
@@ -197,11 +209,12 @@ The paper uses a weaker order $\sqsubseteq_S$ instead:
 1. **Match slacks:** find an injective renaming $\theta$ of the slack variables of $s_0$ into those of $s_1$ with $\mathrm{info}(\beta) = \mathrm{info}(\theta(\beta))$
 2. **Pairwise order** after renaming: LinEq inclusion ⊗ interval inclusion
 
-$\sqsubseteq_S \subsetneq \sqsubseteq_S^*$ — may cause extra widening steps (precision loss), but suffices to detect fixpoints in practice.
+ May cause extra widening steps (precision loss), but suffices to detect fixpoints in practice.
 
 ---
 
-## Leq — our code
+## Leq 
+###### Our code
 
 ```
 leq a b =
@@ -220,17 +233,35 @@ leq a b =
 
 ---
 
+## Drawbacks / Troubles
+ 
+ Paper was sometimes very underspecified:
+ | Paper says | Paper doesn't say |
+|---|---|
+| slacks have `info(β)` | how info changes during Gauss elimination, renaming, substitution |
+| Step 3 re-adds "dropped equalities"  | how to compute what the pairwise join dropped |
+
+The paper does not specify a narrow algorithm.
+Variable removal forced an invention the paper never names: **non-info slacks** -
+interval survives, info is dropped, defining row is eliminated.
+
+---
+
+# Evaluation
+
+---
+
 # Results of our code
 
 ---
 
 ## Profiling Discrepancies
-### Quick fixees
-- Mpqf is FFI to c. In some of th ebenchmarks we spent 60% of the time building numbers
-- Reduction rebuilds on every reduction
+### Quick fixes
+- Mpqf is FFI to c. In some of the benchmarks we spent 60% of the time building numbers
+- Reduction rebuilds on every call
 ### Significant improvments
 - Batch reductions?
-- Hints provide significant precision boost
+- Hints provide information recovery as mentioned on join slide 
 
 ---
 
@@ -254,15 +285,3 @@ leq a b =
 # Comparisons of *All* Benchmarks
 
 ---
-
-## Drawbacks / Troubles
- 
- Paper was sometimes very underspecified:
- | Paper says | Paper doesn't say |
-|---|---|
-| slacks have `info(β)` | how info changes during Gauss elimination, renaming, substitution |
-| Step 3 re-adds "dropped equalities"  | how to compute what the pairwise join dropped |
-
-The paper does not specify a narrow algorithm.
-Variable removal forced an invention the paper never names: **non-info slacks** -
-interval survives, info is dropped, defining row is eliminated.
