@@ -23,14 +23,14 @@ Leonie Houzer, Yannick Schürmann, Nicolas Roth, Florin-Vlad Sabău
 
 ## Polyhedra
 Inequalities of the form: 
-$$\textstyle\sum a_i x_i \le c$$
+$$\sum a_i x_i \le c$$
 
 
-<span style="color: #606060;">*e.g.* $-x + 5y - 4z - 9 \le 0$</span>
+<span style="color: #606060;">*e.g.* $-x + 5y - 4z \le 9$</span>
 
 ## Linear Equalities
 Equalities of the form:
-$$(\textstyle\sum a_i x_i ) +c = 0$$
+$$(\sum a_i x_i ) +c = 0$$
 
 $\longrightarrow$ quite cheap to compute
 
@@ -84,7 +84,7 @@ Our type (`subPolyhedraCore`):
 
 | Field | Content |
 |---|---|
-| `affeq` | sparse rref matrix of affine equalities  [prog vars | slack vars | const] |
+| `affeq` | sparse rref matrix of affine equalities  [prog vars \| slack vars \| const]
 | `intervals` | slack var → rational interval |
 | `infos` | slack var → canonical defining linear form (`info(β)`) |
 
