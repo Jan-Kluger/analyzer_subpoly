@@ -272,7 +272,8 @@ interval survives, info is dropped, defining row is eliminated.
 
 ## Fundemental improvments
 - Canonical slack naming
-  - Leads to better and more efficient leq (fails some lattice properties)
+  - More efficient leq 
+  - Better leq passes more lattice properties together with reclamation
   - We tried this and dropped it, in hindsight could lead to improvments
 - Different reduce algorithm
   - Only so much can be done with micro optimizations, Algorithm seems just inneficient
