@@ -1,6 +1,11 @@
 ; Exclude gobview — it requires OCaml >= 5 (current switch is 4.14) and separate opam deps
 (dirs (:standard \ gobview))
 
+; Patched ocplib-simplex (Bland-style pivot cap in maximize_rec to stop the simplex
+; cycling on degenerate LPs — see vendor/ocplib-simplex/solveBounds.ml). Vendored so it
+; shadows the opam-installed copy in this build.
+(vendored_dirs vendor)
+
 ; (rule (copy src/goblint.exe goblint)) ; this inferred rule syntax does not allow specifying the mode which is necessary because the standard mode forbids targets to exist in the source tree which would be the case for goblint after running make once
 
 (rule

@@ -132,6 +132,25 @@ module SubPoly (Var : Var) (I : IntervalSig with type bound = Rat.t) = struct
     Hashtbl.hash (hash_affeq t.affeq, hash_interval_map t.intervals,
                   hash_info_map t.infos, hash_interval_map t.var_intervals)
 
+  (* ---- Warm-start cache for the LP-based reduction (see [reduce]'s [?warm]). ----
+     Keyed by state content (equal/hash ignore the [reduced] flag); the value is the
+     state's solved simplex environment together with the next free row handle for
+     [assert_row]. The environments are persistent (functional maps inside), so handing
+     the same one to several consumers is safe: their asserts/pivots build new values.
+     Bounded by epoch clearing: hits are temporally local (the transfer function or
+     query currently executing), so evicting old entries only costs a cold rebuild. *)
+  module LpCache = Hashtbl.Make (struct
+      type nonrec t = t
+      let equal = equal
+      let hash = hash
+    end)
+
+  let lp_cache : (Core.t * int) LpCache.t = LpCache.create 512
+
+  let lp_cache_store (key : t) (v : Core.t * int) : unit =
+    if LpCache.length lp_cache >= 512 then LpCache.clear lp_cache;
+    LpCache.replace lp_cache key v
+
 
   (* Everything here is TODO, it has AI generated placeholds so i could run the regtest *)
 
@@ -183,11 +202,18 @@ module SubPoly (Var : Var) (I : IntervalSig with type bound = Rat.t) = struct
   let num_slacks (t: t) = VarMap.cardinal t.intervals
 
 
+  (** Defining matrix row of a new slack at [slack_col]: [expr - slack = 0], with [expr]
+      given at the pre-insertion width (its constant, if any, shifts one to the right).
+      Exposed separately so callers of [insert_slack] can hand exactly this row to
+      [reduce ~warm] as the LP delta. *)
+  let slack_defining_row (slack_col: int) (expr: info) : CoeffVector.t =
+    CoeffVector.set_nth (CoeffVector.insert_zero_at_indices expr [(slack_col, 1)] 1) slack_col (Rat.neg Rat.one)
+
   let insert_slack (slack_col: int) (expr: info) (interval: I.t) (t: t) : t =
     let widen v = CoeffVector.insert_zero_at_indices v [(slack_col, 1)] 1 in
     let affeq = Matrix.add_empty_columns t.affeq [| slack_col |] in
-    let expr  = widen expr in                                          (* slack col now 0, const shifted right *)
-    let row   = CoeffVector.set_nth expr slack_col (Rat.neg Rat.one) in (* expr - slack = 0 *)
+    let row   = slack_defining_row slack_col expr in (* expr - slack = 0 *)
+    let expr  = widen expr in                        (* slack col now 0, const shifted right *)
     let key   = Var.to_t slack_col in
     { affeq     = Matrix.append_row affeq row;
       infos     = VarMap.add key expr (VarMap.map widen t.infos);
@@ -273,17 +299,44 @@ module SubPoly (Var : Var) (I : IntervalSig with type bound = Rat.t) = struct
   let negate v = CoeffVector.map_f_preserves_zero Rat.neg v
 
   (** [recover_def_from_non_info_intv var t] searches the matrix for a row in which [var]
-      occurs with a non-zero coefficient and every other non-zero entry is a program
-      variable (or the constant) - i.e. no other slack appears. Such a row proves
-      [var = linear form over program variables (+ constant)]; that linear form (with the
-      constant kept) is returned as [Some]. Returns [None] when no such row exists. *)
+      occurs with a non-zero coefficient and every other slack that appears still carries
+      an info. Substituting those infos (each a program-variable form the matrix proves
+      equal to its slack) turns the row into a proof of [var = linear form over program
+      variables (+ constant)]; that linear form (with the constant kept) is returned as
+      [Some]. Returns [None] when no such row exists. *)
   let recover_def_from_non_info_intv (var : int) (subpoly : t) : info option =
-    let only_prog_vars v  = List.for_all (fun (idx, _) -> (not @@ (VarMap.mem idx subpoly.intervals)) || (idx = var)) (CoeffVector.to_sparse_list v) in
-    match Matrix.find_opt (fun vec -> ((CoeffVector.nth vec var) <>: Rat.zero) && only_prog_vars vec) subpoly.affeq with
+    let substitutable v =
+      List.for_all (fun (idx, _) ->
+          idx = var
+          || not (VarMap.mem idx subpoly.intervals) (* program column or the constant *)
+          || VarMap.mem idx subpoly.infos)
+        (CoeffVector.to_sparse_list v)
+    in
+    match Matrix.find_opt (fun vec -> ((CoeffVector.nth vec var) <>: Rat.zero) && substitutable vec) subpoly.affeq with
     | None -> None
     | Some vec ->
       let coeff = CoeffVector.nth vec var in
-      Some (CoeffVector.map (fun (i, c) -> (i, Rat.neg (c /: coeff))) (CoeffVector.set_nth vec var Rat.zero))
+      let rest = CoeffVector.set_nth vec var Rat.zero in
+      let width = CoeffVector.length rest in
+      (* substitute every other slack by its info; infos are constant-free forms over
+         program columns only, so a single pass terminates and introduces no new slack.
+         Defensively pad an info stored at a different width (map2 demands equal
+         lengths); widths agree whenever the state is well-formed. *)
+      let at_width v =
+        if CoeffVector.length v = width then v
+        else CoeffVector.of_sparse_list width
+            (List.filter (fun (i, _) -> i < width) (CoeffVector.to_sparse_list v))
+      in
+      let substituted =
+        List.fold_left (fun acc (idx, c) ->
+            match VarMap.find_opt idx subpoly.infos with
+            | Some info ->
+              CoeffVector.map2_f_preserves_zero (fun a b -> a +: c *: b)
+                (CoeffVector.set_nth acc idx Rat.zero) (at_width info)
+            | None -> acc)
+          rest (CoeffVector.to_sparse_list rest)
+      in
+      Some (CoeffVector.map (fun (i, c) -> (i, Rat.neg (c /: coeff))) substituted)
 
   (** [canonicalize_slack slack raw_def t] rescales the existing slack column [slack] so
       that the slack variable becomes equal to the canonical (gcd/lcm/sign-normalized,
@@ -376,32 +429,44 @@ module SubPoly (Var : Var) (I : IntervalSig with type bound = Rat.t) = struct
                           infos = VarMap.remove slack acc.infos }))
       t.intervals t
 
+  (** [ensure_info_total t] re-derives an info for every info-less slack that is still
+      provable from the matrix ([reclaim_slacks]). Slacks whose definition is not
+      derivable are left in place as orphans: eliminating their columns here is NOT an
+      option, because callers (e.g. [add_equation] after [forget_var] in assign) hold
+      coeff vectors computed at the pre-forget width, and shrinking the matrix width
+      underneath them corrupts the state (ragged matrix); keeping a dead column with
+      [compact=false] instead would break the packed-slack invariant behind
+      [slack_col = env size + num_slacks]. Orphans are handled conservatively where they
+      matter: [leq] entails or forgets them, [slack_lce] discards them before join/widen. *)
+  let ensure_info_total (t : t) : t =
+    reclaim_slacks t
+
   (**
     [forget_vars vars t] forgets a list of variables in the polyhedron.
     For slack variables it compacts the indices such that slack variables indices do not carry gaps.
     [remove_columns] does Gaussian elimination with each forgotten program variable as pivot
     ([Matrix.reduce_col]) and drops any slack info that mentions a forgotten variable. Those
-    slacks become info-less orphans; [reclaim_slacks] then tries to re-derive a canonical
-    info for each from a matrix row that still proves it over the remaining variables.
+    slacks become info-less orphans; [ensure_info_total] then re-derives a canonical info
+    for each slack still provable from the matrix and projects out the rest, so the
+    result carries no orphans.
   *)
   let forget_vars (vars: Var.t list) (t: t) =
     let dim_array = Array.of_list vars in
     match List.partition (flip VarMap.mem t.intervals) vars with
     | [], [] -> t
     (* forgetting program variables drops the infos mentioning them (see [remove_columns]),
-       so we try to reclaim a canonical info for the resulting info-less slacks. Forgetting
-       only slacks creates no info-less slacks, hence no reclamation there. *)
-    | [], _ -> reclaim_slacks (remove_columns dim_array t false)
+       so we reclaim or eliminate the resulting info-less slacks. Forgetting only slacks
+       creates no info-less slacks, hence no reclamation there. *)
+    | [], _ -> ensure_info_total (remove_columns dim_array t false)
     | _, [] -> remove_columns dim_array t true
-    | slack_vars, prog_vars -> reclaim_slacks (remove_columns (Array.of_list prog_vars) (remove_columns (Array.of_list slack_vars) t true) false)
+    | slack_vars, prog_vars -> ensure_info_total (remove_columns (Array.of_list prog_vars) (remove_columns (Array.of_list slack_vars) t true) false)
 
-  
+
   (**
   [forget_var var t] forgets a single variable using [forget_vars].
   *)
-  let forget_var (var : Var.t) (t: t) : t = 
-    let compact = VarMap.mem var t.intervals in
-    remove_columns (Array.singleton var) t compact
+  let forget_var (var : Var.t) (t: t) : t =
+    forget_vars [var] t
 
   (**
   [dim_add] Apron dimension change
@@ -437,10 +502,11 @@ module SubPoly (Var : Var) (I : IntervalSig with type bound = Rat.t) = struct
      var_intervals = new_var_intervals; reduced = false}
 
   (**
-  [dim_remove] Apron dimension change
+  [dim_remove] Apron dimension change. Removing program columns drops the infos that
+  mention them (see [remove_columns]), so restore the no-orphan invariant afterwards.
   *)
-  let dim_remove (ch : Apron.Dim.change) (t : t) = 
-    remove_columns ch.dim t true
+  let dim_remove (ch : Apron.Dim.change) (t : t) =
+    ensure_info_total (remove_columns ch.dim t true)
 
   let string_of_interval_map (m: interval_map) =
   VarMap.bindings m
@@ -528,12 +594,12 @@ let string_of (t: t) =
     | None -> raise Infeasible
     | Some intv' -> (env, VarMap.add var intv' acc)
 
-  let lp_of (t : t) : Core.t option =
+  let lp_of_counted (t : t) : (Core.t * int) option =
     try
       let env = Core.empty ~is_int:false ~check_invs:false in
 
       (* Add rows and intervals *)
-      let env, _ = Matrix.fold_left assert_row (env, 0) t.affeq in
+      let env, nrows = Matrix.fold_left assert_row (env, 0) t.affeq in
       let env = VarMap.fold assert_interval t.intervals env in
       let env = VarMap.fold assert_interval t.var_intervals env in
 
@@ -541,8 +607,18 @@ let string_of (t: t) =
          empty and the refine fold below consequently never queries the solver. *)
       match Result.get None (Solve.solve env) with
       | Core.Unsat _ -> None
-      | _ -> Some env
+      | _ -> Some (env, nrows)
     with Infeasible -> None
+
+  (** [lp_of_cached t] is [t]'s solved LP: from the cache on an exact content hit,
+      built cold (and then cached) otherwise. *)
+  let lp_of_cached (t : t) : Core.t option =
+    match LpCache.find_option lp_cache t with
+    | Some (env, _) -> Some env
+    | None ->
+      match lp_of_counted t with
+      | None -> None
+      | Some ((env, _) as v) -> lp_cache_store t v; Some env
 
   (** [reduce t] is the LP-based redu
       after normalizing the matrix (rref), for every variable with an interval it computes, via simplex, 
@@ -560,7 +636,21 @@ let string_of (t: t) =
     | Feasibility_only          (** only detect bottom, leave all intervals as stored *)
     | Refine_cols of Var.t list (** tighten just the given columns (e.g. a query's temporary slack) *)
 
-  let reduce ?(mode=Refine_all) (t: t) : t option =
+  (** Delta certificate for [reduce ~warm:(base, delta)]. The CALLER guarantees that the
+      constraint set of the state being reduced equals [base]'s constraints plus
+      [d_rows] (equality rows, at the mutated state's width; the constant is positional
+      and not an LP variable, so appending trailing slack columns keeps every existing
+      column's LP index stable) plus [d_bounds] (per-column interval bounds, each at
+      most as wide as the bound [base] stores for that column -- the solver only ever
+      tightens on re-assertion). Nothing is verified: a wrong certificate yields wrong
+      bounds. On a cache miss for [base] the reduction silently falls back to a cold
+      LP build, so the certificate is a pure optimization hint. *)
+  type lp_delta = {
+    d_rows : CoeffVector.t list;
+    d_bounds : (Var.t * I.t) list;
+  }
+
+  let reduce ?(mode=Refine_all) ?warm (t: t) : t option =
     (* a reduced state is feasible and has tightest intervals: any mode is a no-op *)
     if t.reduced then Some t
     else
@@ -573,9 +663,32 @@ let string_of (t: t) =
         | Some mat ->
           (* T is now normalized matrix *)
           let t = { t with affeq = mat } in
-          match lp_of t with
+          (* Warm path: on a cache hit for [base], assert only the delta and re-solve
+             (the simplex re-pivots from the previous optimal basis) instead of
+             rebuilding the LP from scratch. [Some None] = warm and infeasible;
+             outer [None] = no warm answer, build cold. *)
+          let warm_env =
+            match warm with
+            | None -> None
+            | Some (base, delta) ->
+              match LpCache.find_option lp_cache base with
+              | None -> None
+              | Some (env, nrows) ->
+                (try
+                   let env, nrows = List.fold_left assert_row (env, nrows) delta.d_rows in
+                   let env = List.fold_left (fun e (v, iv) -> assert_interval v iv e) env delta.d_bounds in
+                   match Result.get None (Solve.solve env) with
+                   | Core.Unsat _ -> Some None
+                   | _ -> Some (Some (env, nrows))
+                 with Infeasible -> Some None)
+          in
+          let env_opt = match warm_env with
+            | Some r -> r
+            | None -> lp_of_counted t
+          in
+          match env_opt with
           | None -> None
-          | Some env ->
+          | Some (env, nrows) ->
           (* We are feasible: refine according to the requested mode. *)
           match mode with
           | Feasibility_only -> Some t (* intervals untouched, so the state stays unreduced *)
@@ -596,8 +709,13 @@ let string_of (t: t) =
             Some t
           | Refine_all ->
             let env, new_intervals = VarMap.fold refine_interval t.intervals (env, VarMap.empty) in
-            let _, new_var_intervals = VarMap.fold refine_interval t.var_intervals (env, VarMap.empty) in
-            Some { t with intervals = new_intervals; var_intervals = new_var_intervals; reduced = true }
+            let env, new_var_intervals = VarMap.fold refine_interval t.var_intervals (env, VarMap.empty) in
+            let res = { t with intervals = new_intervals; var_intervals = new_var_intervals; reduced = true } in
+            (* the refine maximizes only pivot, so [env] still represents exactly [res]'s
+               constraint set (the refined intervals are implied): successors of [res]
+               can warm-start from it, and [lp_of_cached res] is an exact hit *)
+            lp_cache_store res (env, nrows);
+            Some res
       end
     with Infeasible -> None
 
@@ -874,7 +992,10 @@ let string_of (t: t) =
           | None ->
             let env_opt = match !cache with
               | Some e -> e
-              | None -> let e = lp_of src in cache := Some e; e
+              | None ->
+                (* [src] is a reduced state, so this is usually an exact hit on the
+                   environment its own reduce just stored *)
+                let e = lp_of_cached src in cache := Some e; e
             in
             match env_opt with
             | None -> I.top (* operand infeasible: it bounds nothing *)
@@ -972,6 +1093,10 @@ let string_of (t: t) =
   (extra slacks, extra rows, extra variable bounds) make [a] smaller and are irrelevant.
   *)
   let leq (a: t) (b: t) =
+    (* Reflexivity does not depend on completeness of the entailment machinery below
+       (e.g. orphan slacks whose definition is no longer derivable would make it answer
+       a spurious [false] on [leq x x]), so settle structurally equal operands first. *)
+    if equal a b then true else
     let collect_top(x : t) =
       VarMap.fold (fun var intv acc ->
           if I.is_top intv
@@ -997,8 +1122,9 @@ let string_of (t: t) =
     && begin
       let processed_a = forget_vars (collect_top a @ collect_non_info a) a in
       let b_non_info = collect_non_info b in
-      (* one LP construction for [a], shared by the orphan and b-only entailment checks *)
-      let env_a = lazy (lp_of a) in
+      (* one LP for [a], shared by the orphan and b-only entailment checks; [a] was just
+         reduced, so the cache lookup is usually an exact hit *)
+      let env_a = lazy (lp_of_cached a) in
       if not @@ non_info_entailment env_a b b_non_info then false else
       let processed_b = forget_vars (collect_top b @ b_non_info) b in
       (* Slacks that exist only in [b] (their info matches no slack of [a]) need special
@@ -1086,7 +1212,7 @@ let string_of (t: t) =
     let (remapped_a, remapped_b) = inject_slack_for_widen @@ slack_lce a b in
     (*let new_a = reduce remapped_a in*)
     let norm_a = Matrix.normalize remapped_a.affeq in
-    let new_a = match norm_a with 
+    let new_a = match norm_a with
       | None -> None
       | Some x -> Some {remapped_a with affeq = x} in
     let new_b = reduce remapped_b in
@@ -1097,16 +1223,25 @@ let string_of (t: t) =
     | Some x, Some y ->
     let new_intervals = interval_widen x.intervals y.intervals in
     let new_affeq = Matrix.linear_disjunct x.affeq y.affeq in
-    (* Step 3: recover inequalities dropped by the convex step. Per Algorithm 2 this is
-       one-directional (only operand 0's dropped equalities, valuations combined with the
-       interval widening) so the operator stays a widening. *)
-    (* widen keeps the existing slack interval on a match (never tighten) so the operator
-       stays increasing: [old <= widen old new]. *)
-    let joined = recover_step3 ~combine:I.widen ~on_existing:(fun cur _ -> Some cur) ~sources:[x] x y
-        {affeq = new_affeq; intervals = new_intervals; infos = x.infos;
-         var_intervals = interval_widen x.var_intervals y.var_intervals; reduced = false} in
-    let lost_vars = Array.of_enum @@ VarMap.keys @@ VarMap.filter (fun v _ -> not (VarMap.mem v new_intervals)) y.intervals in
-    Some (remove_columns lost_vars joined true)
+    (* Unlike join, widen runs NO Step-3 recovery: with [on_existing] keeping the current
+       interval (required for [old <= widen old new]) recovery could only ever add fresh
+       slack columns, and re-asserting a bound that the interval widening above just
+       discarded is exactly the creep that keeps widening sequences from stabilizing
+       (fresh columns also shift slack indices, so consecutive iterates never compare
+       structurally equal). Dropping recovery only enlarges the result, so the operator
+       stays a widening; termination becomes structural: the slack set never grows
+       (keys of [new_intervals] are a subset of x's slacks), every surviving interval
+       only widens (finitely many strict widenings per slack), and the row space of
+       [linear_disjunct] only shrinks. Single-variable bounds are unaffected: they live
+       in [var_intervals] and are widened there. *)
+    let joined = {affeq = new_affeq; intervals = new_intervals; infos = x.infos;
+                  var_intervals = interval_widen x.var_intervals y.var_intervals; reduced = false} in
+    (* Slacks widened to top no longer constrain anything: keeping them would bloat every
+       later reduce/leq and leave columns whose interval can never come back (widening
+       never tightens), so drop them together with the slacks lost on y's side. *)
+    let top_slacks = VarMap.fold (fun v iv acc -> if I.is_top iv then v :: acc else acc) new_intervals [] in
+    let lost_vars = List.of_enum @@ VarMap.keys @@ VarMap.filter (fun v _ -> not (VarMap.mem v new_intervals)) y.intervals in
+    Some (remove_columns (Array.of_list (top_slacks @ lost_vars)) joined true)
 
   let narrow = meet
   let unify = meet

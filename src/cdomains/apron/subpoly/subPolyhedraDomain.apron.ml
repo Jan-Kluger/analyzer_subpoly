@@ -142,12 +142,18 @@ module Slack_managment = struct
 
   (** [add_slack_constraint t linexpr interval] introduces a fresh slack [s = linexpr]
       constrained to [interval]. Here the constant is pulled out of the linear expression
-      into the interval and also stripped out of the info.*)
-  let add_slack_constraint (t: t) (linexpr: linexpr) (interval: RationalInterval.t) : t =
-    if is_bot_env t then t
+      into the interval and also stripped out of the info.
+      Also returns the warm-start certificate for the follow-up reduce (see
+      [SubPolyDomain.lp_delta]): the pre-mutation state together with exactly what this
+      call added to the constraint set (the fresh slack's defining row and bound, or the
+      tightened bound of the already-existing slack). [None] when there is nothing to
+      warm-start (bot, or the meet emptied an interval). *)
+  let add_slack_constraint (t: t) (linexpr: linexpr) (interval: RationalInterval.t)
+    : t * (SubPolyDomain.t * SubPolyDomain.lp_delta) option =
+    if is_bot_env t then (t, None)
     else
       match t.d with
-      | None -> t
+      | None -> (t, None)
       | Some d ->
         (* normalize expr and then insert when adding slacks *)
         let normalized, factor = normalize_info linexpr in
@@ -160,16 +166,20 @@ module Slack_managment = struct
         (* add the constant into the interval*)
         let interval = RationalInterval.add_const (Rat.neg const) interval in
         let find_key_on_info map info = Seq.find (fun (_, v) -> SubPolyDomain.info_equal v info) @@ SubPolyDomain.VarMap.to_seq map in
-        match find_key_on_info  d.infos info with 
+        match find_key_on_info  d.infos info with
         | None -> (*There is no slack yet with that info, we insert a new one.*)
           (* the new slack goes at column n+m = the current constant-column index *)
           let slack_col = Environment.size t.env + SubPolyDomain.num_slacks d in (*Not sure if this is safe, as there might be a gap no?*)
-          { t with d = Some (SubPolyDomain.insert_slack slack_col info interval d) }
+          ({ t with d = Some (SubPolyDomain.insert_slack slack_col info interval d) },
+           Some (d, { SubPolyDomain.d_rows = [SubPolyDomain.slack_defining_row slack_col info];
+                      d_bounds = [(slack_col, interval)] }))
         | Some (k, _) -> (* We already have a slack with that info and update its interval.*)
-          match RationalInterval.meet (SubPolyDomain.VarMap.find k d.intervals) interval with 
-          | None -> bot_env
-          | Some i -> {t with d = Some (SubPolyDomain.set_intv k i d)} 
-        
+          match RationalInterval.meet (SubPolyDomain.VarMap.find k d.intervals) interval with
+          | None -> (bot_env, None)
+          | Some i ->
+            ({t with d = Some (SubPolyDomain.set_intv k i d)},
+             Some (d, { SubPolyDomain.d_rows = []; d_bounds = [(k, i)] }))
+
 end
 
 module ExpressionBounds: (SharedFunctions.ConvBounds with type t = VarManagement.t) = struct
@@ -202,8 +212,13 @@ module ExpressionBounds: (SharedFunctions.ConvBounds with type t = VarManagement
 
         let slack_col = Environment.size t.env + SubPolyDomain.num_slacks d in
         (* only the temporary slack's interval is read back, so only that column needs
-           refining -- a full reduce would run 2 LP optimizations per stored interval *)
+           refining -- a full reduce would run 2 LP optimizations per stored interval.
+           [d] is a stored (reduced) state, so its solved LP is usually cached: the warm
+           certificate (just the temporary slack's defining row; its interval is top,
+           which asserts nothing) turns the query into two maximize calls on the warm
+           tableau instead of a full LP rebuild. *)
         let* d' = SubPolyDomain.reduce ~mode:(SubPolyDomain.Refine_cols [slack_col])
+            ~warm:(d, { SubPolyDomain.d_rows = [SubPolyDomain.slack_defining_row slack_col v]; d_bounds = [] })
             (SubPolyDomain.insert_slack slack_col v RationalInterval.top d) in
         let lower, upper = RationalInterval.bounds (SubPolyDomain.VarMap.find slack_col d'.intervals) in
         Some (Option.map z_ceil lower, Option.map z_floor upper)
@@ -318,6 +333,11 @@ same indices. Then it calls SubPolyDomain.widen on the updated subpolyhedra. Ada
 
 
   let leq a b =
+    (* An empty state constrains nothing, so everything is below it regardless of the
+       environments. In particular [top ()] carries the empty environment, which the
+       env_comp check below would otherwise reject whenever [a] has variables
+       (env_comp > 0), making [leq a (top ())] spuriously false. *)
+    if is_top b then true else
     let env_comp = Environment.cmp a.env b.env in (* Apron's Environment.cmp has defined return values. *)
     if env_comp = -2 || env_comp > 0 then
       (* -2:  environments are not compatible (a variable has different types in the 2 environements *)
@@ -365,12 +385,15 @@ same indices. Then it calls SubPolyDomain.widen on the updated subpolyhedra. Ada
       stabilize -- observed as an infinite +1 bound creep on [while (i < n) i++]).
       The cost is bounded by the [reduced] flag: a state is fully reduced at most once,
       and the single-variable fast path below skips this entirely for re-asserted
-      unchanged bounds (the type-bounds common case). *)
-  let reduce_to_bot (t: t) : t =
+      unchanged bounds (the type-bounds common case).
+      [?warm] is the warm-start certificate (pre-mutation state + what was added, see
+      [SubPolyDomain.lp_delta]): when the base state's solved LP is still cached, the
+      reduce asserts only the delta instead of rebuilding the LP from scratch. *)
+  let reduce_to_bot ?warm (t: t) : t =
     match t.d with
     | None -> t
     | Some d ->
-      match SubPolyDomain.reduce d with
+      match SubPolyDomain.reduce ?warm d with
       | None -> bot_env
       | Some d' -> { t with d = Some d' }
 
@@ -397,7 +420,8 @@ same indices. Then it calls SubPolyDomain.widen on the updated subpolyhedra. Ada
       | Some m when (match old with Some o -> RationalInterval.equal o m | None -> false) ->
         t (* bound unchanged: nothing new, skip even the feasibility check *)
       | Some m ->
-        reduce_to_bot { t with d = Some (SubPolyDomain.set_var_intv col m d) }
+        reduce_to_bot ~warm:(d, { SubPolyDomain.d_rows = []; d_bounds = [(col, m)] })
+          { t with d = Some (SubPolyDomain.set_var_intv col m d) }
 
 
   (** [substitute_expr t assigned_dim rhs] is the transfer function for the invertible
@@ -468,7 +492,7 @@ same indices. Then it calls SubPolyDomain.widen on the updated subpolyhedra. Ada
               match to_single_var_opt info' with
               | Some (col, a, c) when col < Environment.size t.env ->
                 meet_single_var_constraint t col a c interval
-              | _ -> add_slack_constraint t info' interval) stale t
+              | _ -> fst (add_slack_constraint t info' interval)) stale t
 
   let assign_texpr (t: VarManagement.t) var texp =
     match t.d with
@@ -549,7 +573,10 @@ same indices. Then it calls SubPolyDomain.widen on the updated subpolyhedra. Ada
           | Some c, SUP   -> if c <=: Rat.zero then bot_env else t
           | Some c, DISEQ -> if c =:  Rat.zero then bot_env else t
           (* expr has variables: record it (inconsistency caught later, at rref) *)
-          | None, EQ            -> reduce_to_bot { t with d = Some (SubPolyDomain.add_affeq_row v (Option.get t.d)) }
+          | None, EQ            ->
+            let d0 = Option.get t.d in
+            reduce_to_bot ~warm:(d0, { SubPolyDomain.d_rows = [v]; d_bounds = [] })
+              { t with d = Some (SubPolyDomain.add_affeq_row v d0) }
           | None, SUPEQ ->
             let expr_interval = RationalInterval.of_bounds ~lower:(Some Rat.zero) ~upper:None in
             begin match to_single_var_opt v with
@@ -557,7 +584,7 @@ same indices. Then it calls SubPolyDomain.widen on the updated subpolyhedra. Ada
                 (* single-variable inequality (e.g. a type bound): plain interval on the
                    variable's column, no slack and no LP needed *)
                 meet_single_var_constraint t col a c expr_interval
-              | _ -> reduce_to_bot @@ add_slack_constraint t v expr_interval
+              | _ -> let t', warm = add_slack_constraint t v expr_interval in reduce_to_bot ?warm t'
             end
           | None, SUP ->
             (* over integer variables expr > 0 <=> expr >= 1, provided expr is
@@ -572,7 +599,7 @@ same indices. Then it calls SubPolyDomain.widen on the updated subpolyhedra. Ada
             begin match to_single_var_opt v with
               | Some (col, a, c) when col < Environment.size t.env ->
                 meet_single_var_constraint t col a c expr_interval
-              | _ -> reduce_to_bot (add_slack_constraint t v expr_interval)
+              | _ -> let t', warm = add_slack_constraint t v expr_interval in reduce_to_bot ?warm t'
             end
           | _ -> t (* DISEQ / EQMOD over variables: not representable, give up (sound) *)
         end
