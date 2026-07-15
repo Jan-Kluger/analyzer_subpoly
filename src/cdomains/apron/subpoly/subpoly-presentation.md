@@ -21,7 +21,66 @@ Leonie Houzer, Yannick Schürmann, Nicolas Roth, Florin-Vlad Sabău
 
 ---
 
-## Agenda
+# Polyhedra
+
+$a_0 \cdot x_0 + \ldots + a_n \cdot x_n \le c$  
+*e.g.* $-x + 5y - 4z - 9 \le 0$
+
+# Subpolyhedra
+
+<u>idea</u>: combine linear equalities & intervals
+
+linear equalities: $a_0 \cdot x_0 + \ldots + a_n \cdot x_n + c = 0$ $\longrightarrow$ quite cheap to compute
+
+instead of storing  $a_0 \cdot x_0 + \ldots + a_n \cdot x_n \le c$
+we store  $a_0 \cdot x_0 + \ldots + a_n \cdot x_n = \beta$ and $\beta \in [-\infty, c]$.    [$\beta$ is called a slack variable]
+
+In the linear equalities we always have $=0$. Therefore we store
+$a_0 \cdot x_0 + \ldots + a_n \cdot x_n - \beta = 0$ instead of $a_0 \cdot x_0 + \ldots + a_n \cdot x_n = \beta$.
+
+---
+
+# Our Data type for the subpoly
+
+<u>we need to store:</u>
+
+- the linear equalities $\Rightarrow$ Reuse the matrix from affine equality dense
+- the intervals $\Rightarrow$ Map: maps every slack variable to an interval
+- somehow remember what is a slack variable and for which equality is it $\Rightarrow$ Map: maps every slack variable to an info (basically the row entries)
+
+```ocaml
+type t = {
+  affeq: affeq;
+  intervals: interval_map;
+  infos: info_map;
+}
+```
+
+Decisions at the start:
+- No Apron names for slacks, we need to do all bookkeeping of slacks
+- Reuse the sparse `ListMatrix`/`SparseVector` kit from the affeq domain
+- Use Exact rationals everywhere
+- Canonical infos: gcd/lcm-scaled, sign-normalized
+
+
+---
+
+# Overview
+
+- dim_add, dim_remove
+- forget_var
+- assign-Functions + simplify texpr
+- <mark>join</mark>, meet, <mark>leq</mark> + <mark>slack_lce</mark>
+- <mark>widen</mark>, narrow, unify
+- bound_texpr
+- assert_constraint + meet_tcons
+- <mark>reduce</mark>
+
+---
+
+
+
+## Agenda (TODO)
 
 1. What is Subpoly?
 2. How We Model Subpoly
