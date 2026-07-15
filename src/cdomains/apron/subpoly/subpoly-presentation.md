@@ -92,9 +92,8 @@ Our type (`subPolyhedraCore`):
 
 Decisions at the start:
 - No Apron names for slacks, we need to do all bookkeeping of slacks
-- Reuse the sparse `ListMatrix`/`SparseVector` kit from the affeq domain
 - Use Exact rationals everywhere (no float)
-- Canonical infos
+
 
 ---
 
@@ -103,10 +102,10 @@ Decisions at the start:
 - dim_add, dim_remove
 - forget_var
 - assign-Functions + simplify texpr
-- <mark>join</mark>, meet, <mark>leq</mark> + <mark>slack_lce</mark>
-- <mark>widen</mark>, narrow, unify
 - bound_texpr
 - assert_constraint + meet_tcons
+- <mark>join</mark>, meet, <mark>leq</mark> + <mark>slack_lce</mark>
+- <mark>widen</mark>, narrow, unify
 - <mark>reduce</mark>
 
 ---
